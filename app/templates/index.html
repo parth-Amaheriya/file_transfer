@@ -1,0 +1,142 @@
+{% extends "base.html" %}
+{% block title %}Transfer Hub · Sessions{% endblock %}
+{% block content %}
+<section class="card session-create">
+  <h2>Create session</h2>
+  <form class="inline-form" method="post" action="/ui/sessions">
+    <div class="inline-form__controls">
+      <input id="label" name="label" type="text" placeholder="Session label (optional)" />
+      <button type="submit">Create</button>
+    </div>
+  </form>
+</section>
+
+<section class="card pairing-card">
+  <header class="section-head">
+    <div>
+      <h2>Device pairing</h2>
+      <p class="muted">Generate a key on Device A, enter it on Device B to link channels.</p>
+    </div>
+  </header>
+  <div class="pairing-grid">
+    <div class="pairing-panel">
+      <h3>Device A · generate</h3>
+      <form id="pairing-generate-form" class="pairing-form">
+        <label for="gen-identifier">Identifier</label>
+        <input id="gen-identifier" name="device_identifier" type="text" placeholder="device-a" required />
+        <label for="gen-label">Label (optional)</label>
+        <input id="gen-label" name="device_label" type="text" placeholder="Uploader laptop" />
+        <button type="submit">Generate key</button>
+      </form>
+      <div class="pairing-result">
+        <p id="pairing-generate-status" class="muted">No key yet.</p>
+        <div id="pairing-code-pill" class="pairing-code" hidden></div>
+      </div>
+    </div>
+    <div class="pairing-panel">
+      <h3>Device B · join</h3>
+      <form id="pairing-join-form" class="pairing-form">
+        <label for="join-code">Pairing code</label>
+        <input id="join-code" name="pairing_code" type="text" placeholder="8F2KQZ" required />
+        <label for="join-identifier">Identifier</label>
+        <input id="join-identifier" name="device_identifier" type="text" placeholder="device-b" required />
+        <label for="join-label">Label (optional)</label>
+        <input id="join-label" name="device_label" type="text" placeholder="Receiver tablet" />
+        <button type="submit">Join device</button>
+      </form>
+      <div class="pairing-result">
+        <p id="pairing-join-status" class="muted">Waiting for code.</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section class="card">
+  <header class="section-head">
+    <div>
+      <h2>Sessions</h2>
+      <p class="muted">Newest first</p>
+    </div>
+  </header>
+  {% if sessions %}
+  <ul class="session-list">
+    {% for session in sessions %}
+    <li>
+      <div>
+        <strong>{{ session.label or ("Session " ~ session.id[:6]) }}</strong>
+        <p class="muted">{{ session.created_at.strftime('%Y-%m-%d %H:%M:%S') }}</p>
+      </div>
+      <a class="ghost" href="/sessions/{{ session.id }}">Open</a>
+    </li>
+    {% endfor %}
+  </ul>
+  {% else %}
+  <p class="muted">No sessions yet. Create one above to begin transferring data.</p>
+  {% endif %}
+</section>
+{% endblock %}
+
+{% block scripts %}
+<script>
+  const generatorForm = document.getElementById("pairing-generate-form");
+  const joinForm = document.getElementById("pairing-join-form");
+  const generateStatus = document.getElementById("pairing-generate-status");
+  const joinStatus = document.getElementById("pairing-join-status");
+  const codePill = document.getElementById("pairing-code-pill");
+
+  const field = (form, name) => form?.elements.namedItem(name);
+  const value = (form, name) => (field(form, name)?.value || "").trim();
+
+  const postJson = async (url, payload) => {
+    const response = await fetch(url, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+    if (!response.ok) {
+      const text = await response.text();
+      throw new Error(text || `Request failed with ${response.status}`);
+    }
+    return response.json();
+  };
+
+  generatorForm?.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    generateStatus.textContent = "Generating key...";
+    codePill.hidden = true;
+    try {
+      const payload = {
+        device: {
+          identifier: value(generatorForm, "device_identifier"),
+          label: value(generatorForm, "device_label") || null,
+        },
+      };
+      const data = await postJson("/api/pairings", payload);
+      codePill.textContent = data.code;
+      codePill.hidden = false;
+      generateStatus.textContent = `Share this code with Device B (${data.status}).`;
+    } catch (error) {
+      generateStatus.textContent = error.message || "Failed to generate key.";
+    }
+  });
+
+  joinForm?.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    joinStatus.textContent = "Submitting...";
+    try {
+      const payload = {
+        device: {
+          identifier: value(joinForm, "device_identifier"),
+          label: value(joinForm, "device_label") || null,
+        },
+      };
+      const code = value(joinForm, "pairing_code");
+      const data = await postJson(`/api/pairings/${encodeURIComponent(code)}/join`, payload);
+      const partner = data.initiator.label || data.initiator.identifier;
+      joinStatus.textContent = `Connected to ${partner}. Status: ${data.status}.`;
+    } catch (error) {
+      joinStatus.textContent = error.message || "Failed to join key.";
+    }
+  });
+</script>
+{% endblock %}
