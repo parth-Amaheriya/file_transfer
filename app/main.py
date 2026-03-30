@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 import asyncio
+import errno
+import logging
 import secrets
+import tempfile
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -29,8 +32,27 @@ static_dir = APP_DIR / "static"
 static_dir.mkdir(parents=True, exist_ok=True)
 app.mount("/static", StaticFiles(directory=static_dir), name="static")
 
-uploads_root = Path(settings.uploads_path)
-uploads_root.mkdir(parents=True, exist_ok=True)
+logger = logging.getLogger("transfer_hub")
+
+
+def _prepare_upload_root(raw_path: Path) -> Path:
+    try:
+        raw_path.mkdir(parents=True, exist_ok=True)
+        return raw_path
+    except OSError as exc:
+        if exc.errno != errno.EROFS:
+            raise
+        fallback = Path(tempfile.gettempdir()) / "transfer_hub_uploads"
+        fallback.mkdir(parents=True, exist_ok=True)
+        logger.warning(
+            "Uploads path %s is read-only; using temporary directory %s instead.",
+            raw_path,
+            fallback,
+        )
+        return fallback
+
+
+uploads_root = _prepare_upload_root(Path(settings.uploads_path))
 
 _sessions = get_collection("sessions")
 _logs = get_collection("logs")

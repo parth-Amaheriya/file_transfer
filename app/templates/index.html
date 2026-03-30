@@ -83,9 +83,11 @@
   const generateStatus = document.getElementById("pairing-generate-status");
   const joinStatus = document.getElementById("pairing-join-status");
   const codePill = document.getElementById("pairing-code-pill");
+  let stopPairingWatcher = null;
 
   const field = (form, name) => form?.elements.namedItem(name);
   const value = (form, name) => (field(form, name)?.value || "").trim();
+  const describeDevice = (device) => device?.label || device?.identifier || "Device";
 
   const postJson = async (url, payload) => {
     const response = await fetch(url, {
@@ -98,6 +100,39 @@
       throw new Error(text || `Request failed with ${response.status}`);
     }
     return response.json();
+  };
+
+  const watchPairingStatus = (code) => {
+    if (stopPairingWatcher) {
+      stopPairingWatcher();
+    }
+    let stopped = false;
+    stopPairingWatcher = () => {
+      stopped = true;
+    };
+
+    const poll = async () => {
+      if (stopped) return;
+      try {
+        const response = await fetch(`/api/pairings/${encodeURIComponent(code)}`);
+        if (response.ok) {
+          const data = await response.json();
+          if (data.status === "connected") {
+            const peer = describeDevice(data.peer);
+            generateStatus.textContent = `Device B connected (${peer}).`;
+            stopPairingWatcher();
+            return;
+          }
+        }
+      } catch (error) {
+        console.warn("Pairing poll failed", error);
+      }
+      if (!stopped) {
+        setTimeout(poll, 2000);
+      }
+    };
+
+    poll();
   };
 
   generatorForm?.addEventListener("submit", async (event) => {
@@ -114,9 +149,14 @@
       const data = await postJson("/api/pairings", payload);
       codePill.textContent = data.code;
       codePill.hidden = false;
-      generateStatus.textContent = `Share this code with Device B (${data.status}).`;
+      generateStatus.textContent = `Share this code with Device B (${data.status}). Waiting for connection...`;
+      watchPairingStatus(data.code);
     } catch (error) {
       generateStatus.textContent = error.message || "Failed to generate key.";
+      if (stopPairingWatcher) {
+        stopPairingWatcher();
+        stopPairingWatcher = null;
+      }
     }
   });
 
