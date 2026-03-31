@@ -377,7 +377,7 @@ async def websocket_peer_connection(pairing_id: str, device_id: str, ws: WebSock
                 continue
 
             # Relay messages to peer
-            if msg_type in ["text", "file_init", "file_chunk", "file_end"]:
+            if msg_type in ["text", "file_init", "file_chunk", "file_end", "file_shared"]:
                 success = await connection_manager.send_to_peer(
                     pairing_id, device_id, {"sender": device_id, **data}
                 )

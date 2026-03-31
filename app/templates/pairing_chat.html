@@ -42,13 +42,20 @@
 .chat-container {
   display: flex;
   flex-direction: column;
-  height: calc(100vh - 200px);
-  max-width: 700px;
+  height: calc(100vh - 180px);
+  max-width: 100%;
   margin: 0 auto;
-  border: 1px solid #e0e0e0;
-  border-radius: 8px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
   overflow: hidden;
-  background: #fafafa;
+  background: var(--item-bg);
+  box-shadow: var(--shadow);
+}
+
+@media (min-width: 768px) {
+  .chat-container {
+    max-width: 800px;
+  }
 }
 
 .chat-header {
@@ -56,8 +63,8 @@
   justify-content: space-between;
   align-items: center;
   padding: 20px;
-  border-bottom: 1px solid #e0e0e0;
-  background: #fff;
+  border-bottom: 1px solid var(--border);
+  background: var(--card);
 }
 
 .chat-header h2 {
@@ -71,10 +78,12 @@
 }
 
 .chat-header code {
-  background: #f0f0f0;
+  background: var(--pre-bg);
   padding: 2px 6px;
   border-radius: 4px;
   font-size: 0.85em;
+  color: var(--text);
+  border: 1px solid var(--border);
 }
 
 .chat-messages {
@@ -106,22 +115,50 @@
 }
 
 .message-bubble {
-  max-width: 70%;
+  max-width: 85%;
   padding: 10px 14px;
   border-radius: 12px;
   word-wrap: break-word;
   box-shadow: 0 1px 2px rgba(0,0,0,0.1);
+  color: var(--text);
+  overflow-x: auto;
+}
+
+@media (min-width: 768px) {
+  .message-bubble {
+    max-width: 70%;
+  }
+}
+
+.message-bubble img,
+.message-bubble video {
+  max-width: 100%;
+  border-radius: 8px;
+  height: auto;
+}
+
+.message-bubble audio {
+  max-width: 100%;
 }
 
 .message.sent .message-bubble {
-  background: #007bff;
-  color: white;
+  background: var(--msg-sent);
+  color: var(--text-inverse);
   border-radius: 12px 4px 12px 12px;
 }
 
+.message.sent .download-btn {
+  background: rgba(255,255,255,0.2) !important;
+  color: #fff !important;
+}
+
+.message.sent .download-btn:hover {
+  background: rgba(255,255,255,0.3) !important;
+}
+
 .message.received .message-bubble {
-  background: #e0e0e0;
-  color: #333;
+  background: var(--msg-received);
+  color: var(--msg-received-text);
   border-radius: 4px 12px 12px 12px;
 }
 
@@ -130,9 +167,16 @@
   font-size: 0.9em;
   white-space: pre-wrap;
   word-wrap: break-word;
-  background: #f8f9fa !important;
-  border: 1px solid #e9ecef;
-  padding: 8px !important;
+  background: var(--pre-bg) !important;
+  border: 1px solid var(--border);
+  padding: 12px 14px !important;
+  color: var(--text);
+}
+
+.message.sent .code-message {
+  background: rgba(0, 0, 0, 0.2) !important;
+  border-color: rgba(255, 255, 255, 0.2);
+  color: var(--text-inverse);
 }
 
 .code-message pre {
@@ -143,19 +187,20 @@
 .code-message code {
   background: none;
   padding: 0;
+  color: inherit;
 }
 
 .message-time {
   font-size: 0.75em;
-  color: #999;
+  color: var(--muted);
   align-self: flex-end;
   margin-top: 2px;
 }
 
 .chat-input-area {
   padding: 15px;
-  border-top: 1px solid #e0e0e0;
-  background: #fff;
+  border-top: 1px solid var(--border);
+  background: var(--card);
 }
 
 .input-group {
@@ -171,100 +216,104 @@
 
 .btn-code {
   padding: 4px 8px;
-  background: #6c757d;
-  color: white;
+  background: var(--muted);
+  color: var(--text-inverse);
   border: none;
   border-radius: 4px;
   cursor: pointer;
   font-size: 0.8em;
-  transition: background 0.2s;
+  transition: opacity 0.2s;
 }
 
 .btn-code:hover {
-  background: #5a6268;
+  opacity: 0.8;
 }
 
 .btn-code.active {
-  background: #007bff;
+  background: var(--accent);
 }
 
 #message-input {
   flex: 1;
   padding: 10px 12px;
-  border: 1px solid #ddd;
+  border: 1px solid var(--border);
   border-radius: 6px;
   font-family: inherit;
   font-size: 1em;
   resize: none;
+  background: var(--input-bg);
+  color: var(--text);
 }
 
 #message-input:focus {
   outline: none;
-  border-color: #007bff;
-  box-shadow: 0 0 0 3px rgba(0, 123, 255, 0.1);
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.1);
 }
 
 #message-input:disabled {
-  background: #f5f5f5;
-  color: #999;
+  background: var(--item-bg);
+  color: var(--muted);
   cursor: not-allowed;
+  opacity: 0.7;
 }
 
 .btn-send {
   padding: 10px 20px;
-  background: #007bff;
-  color: white;
+  background: var(--accent);
+  color: var(--text-inverse);
   border: none;
   border-radius: 6px;
   cursor: pointer;
   font-size: 1em;
   font-weight: 500;
-  transition: background 0.2s;
+  transition: opacity 0.2s;
 }
 
 .btn-send:hover:not(:disabled) {
-  background: #0056b3;
+  opacity: 0.8;
 }
 
 .btn-send:disabled {
-  background: #ccc;
+  background: var(--muted);
   cursor: not-allowed;
+  opacity: 0.5;
 }
 
 .btn-upload {
   padding: 8px 16px;
-  background: #28a745;
-  color: white;
+  background: #10b981;
+  color: var(--text-inverse);
   border: none;
   border-radius: 6px;
   cursor: pointer;
   font-size: 0.9em;
   font-weight: 500;
-  transition: background 0.2s;
+  transition: opacity 0.2s;
   margin-top: 10px;
 }
 
 .btn-upload:hover {
-  background: #218838;
+  opacity: 0.8;
 }
 
 .file-upload-area {
   margin-top: 10px;
   padding: 10px;
-  border: 2px dashed #ddd;
+  border: 2px dashed var(--border);
   border-radius: 6px;
-  background: #fafafa;
-  transition: border-color 0.2s;
+  background: var(--item-bg);
+  transition: border-color 0.2s, background-color 0.2s;
 }
 
 .file-upload-area.dragover {
-  border-color: #007bff;
-  background: #f0f8ff;
+  border-color: var(--accent);
+  background: rgba(37, 99, 235, 0.05);
 }
 
 .upload-hint {
   font-size: 0.8em;
-  color: #666;
+  color: var(--muted);
   margin-left: 10px;
 }
 
@@ -277,7 +326,8 @@
   align-items: center;
   gap: 10px;
   padding: 8px;
-  background: #f8f9fa;
+  background: var(--input-bg);
+  border: 1px solid var(--border);
   border-radius: 4px;
   margin-bottom: 5px;
 }
@@ -285,21 +335,31 @@
 .file-item span {
   flex: 1;
   font-size: 0.9em;
+  color: var(--text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .file-item button {
-  background: #dc3545;
-  color: white;
+  background: #ef4444;
+  color: var(--text-inverse);
   border: none;
   border-radius: 4px;
   padding: 4px 8px;
   cursor: pointer;
   font-size: 0.8em;
+  transition: opacity 0.2s;
+}
+
+.file-item button:hover {
+  opacity: 0.8;
 }
 
 .error-message {
-  background: #fee;
-  color: #c33;
+  background: rgba(239, 68, 68, 0.1);
+  color: #ef4444;
+  border: 1px solid rgba(239, 68, 68, 0.2);
   padding: 15px;
   border-radius: 6px;
   margin: 20px;
@@ -475,9 +535,25 @@
     
     const bubble = document.createElement('div');
     bubble.className = 'message-bubble';
+    
+    const downloadUrl = `/api/pairing/${encodeURIComponent(pairingId)}/files/${encodeURIComponent(filename)}`;
+    const fileExt = filename.split('.').pop().toLowerCase();
+    let previewHtml = '';
+    
+    if (['jpg', 'jpeg', 'png', 'gif', 'webp'].includes(fileExt)) {
+      previewHtml = `<a href="${downloadUrl}" target="_blank"><img src="${downloadUrl}" alt="${filename}" style="margin-bottom: 8px; border-radius: 8px;"></a><br>`;
+    } else if (['mp4', 'webm', 'ogg'].includes(fileExt)) {
+      previewHtml = `<video controls style="margin-bottom: 8px; border-radius: 8px;"><source src="${downloadUrl}" type="video/${fileExt}"></video><br>`;
+    } else if (['mp3', 'wav', 'ogg'].includes(fileExt)) {
+      previewHtml = `<audio controls style="margin-bottom: 8px;"><source src="${downloadUrl}" type="audio/${fileExt}"></audio><br>`;
+    }
+    
     bubble.innerHTML = `
-      📄 <strong>${filename}</strong> (${formatFileSize(size)})<br>
-      <a href="/api/pairing/${encodeURIComponent(pairingId)}/files/${encodeURIComponent(filename)}" target="_blank" style="color: #007bff;">Download</a>
+      ${previewHtml}
+      <div style="display: flex; align-items: center; justify-content: space-between; gap: 15px; margin-top: 5px;">
+        <span style="overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 0.95em;">📄 <strong>${filename}</strong> <span style="opacity: 0.8; font-size: 0.9em;">(${formatFileSize(size)})</span></span>
+        <a href="${downloadUrl}" download class="download-btn" style="color: var(--text-inverse); background: var(--accent); padding: 5px 12px; border-radius: 6px; text-decoration: none; font-size: 0.85em; font-weight: 500; white-space: nowrap; transition: background 0.2s;">Download</a>
+      </div>
     `;
     
     const time = document.createElement('div');
