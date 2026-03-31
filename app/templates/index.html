@@ -149,22 +149,23 @@
 
   generatorForm?.addEventListener("submit", async (event) => {
     event.preventDefault();
-    generateStatus.textContent = "Generating key...";
+    generateStatus.textContent = "Generating pairing code...";
     codePill.hidden = true;
     try {
+      const deviceId = value(generatorForm, "device_identifier");
       const payload = {
         device: {
-          identifier: value(generatorForm, "device_identifier"),
+          identifier: deviceId,
           label: value(generatorForm, "device_label") || null,
         },
       };
-      const data = await postJson("/api/pairings", payload);
+      const data = await postJson("/api/pairing/initiate", payload);
       codePill.textContent = data.code;
       codePill.hidden = false;
-      generateStatus.textContent = `Share this code with Device B (${data.status}). Waiting for connection...`;
-      watchPairingStatus(data.code);
+      generateStatus.textContent = `Code generated! Share with Device B. Waiting for connection...`;
+      watchPairingStatus(data.code, deviceId, payload.device);
     } catch (error) {
-      generateStatus.textContent = error.message || "Failed to generate key.";
+      generateStatus.textContent = `Error: ${error.message || "Failed to generate code"}`;
       if (stopPairingWatcher) {
         stopPairingWatcher();
         stopPairingWatcher = null;
@@ -174,20 +175,31 @@
 
   joinForm?.addEventListener("submit", async (event) => {
     event.preventDefault();
-    joinStatus.textContent = "Submitting...";
+    joinStatus.textContent = "Joining pairing...";
     try {
+      const deviceId = value(joinForm, "device_identifier");
+      const deviceLabel = value(joinForm, "device_label");
+      const currentDevice = {
+        identifier: deviceId,
+        label: deviceLabel || null,
+      };
       const payload = {
-        device: {
-          identifier: value(joinForm, "device_identifier"),
-          label: value(joinForm, "device_label") || null,
-        },
+        device: currentDevice,
       };
       const code = value(joinForm, "pairing_code");
-      const data = await postJson(`/api/pairings/${encodeURIComponent(code)}/join`, payload);
+      const data = await postJson(`/api/pairing/join/${encodeURIComponent(code)}`, payload);
       const partner = data.initiator.label || data.initiator.identifier;
-      joinStatus.textContent = `Connected to ${partner}. Status: ${data.status}.`;
+      
+      const chatBtn = document.createElement('button');
+      chatBtn.textContent = `💬 Go to Chat`;
+      chatBtn.className = 'ghost';
+      chatBtn.onclick = () => goToChat(data.id, deviceId, currentDevice, data.initiator);
+      chatBtn.style.marginLeft = '10px';
+      
+      joinStatus.innerHTML = `✓ Successfully connected to ${partner}! `;
+      joinStatus.appendChild(chatBtn);
     } catch (error) {
-      joinStatus.textContent = error.message || "Failed to join key.";
+      joinStatus.textContent = `Error: ${error.message || "Failed to join pairing"}`;
     }
   });
 </script>
