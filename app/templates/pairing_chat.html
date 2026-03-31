@@ -307,6 +307,8 @@
       addMessage(data.content, 'received');
     } else if (msgType === 'error') {
       addSystemMessage('⚠️ ' + data.message, 'error');
+    } else if (msgType === 'peer_connected') {
+      addSystemMessage('✅ Peer device connected!', 'info');
     } else if (msgType === 'file_init') {
       addSystemMessage('📁 Receiving: ' + data.file_name, 'info');
     } else if (msgType === 'file_end') {

@@ -187,6 +187,7 @@ class ConnectionManager:
 
     def __init__(self):
         self.connections: dict[str, dict[str, WebSocket]] = {}  # pairing_id -> {device_id: ws}
+        self.message_queue: dict[str, dict[str, list[dict]]] = {}  # pairing_id -> {from_device: [messages]}
         self.lock = asyncio.Lock()
 
     async def connect(self, pairing_id: str, device_id: str, ws: WebSocket) -> None:
@@ -196,31 +197,69 @@ class ConnectionManager:
                 self.connections[pairing_id] = {}
             self.connections[pairing_id][device_id] = ws
 
+            # Send queued messages to this device
+            if pairing_id in self.message_queue:
+                for from_device, messages in list(self.message_queue[pairing_id].items()):
+                    target_device = next((d for d in self.connections[pairing_id].keys() if d != from_device), None)
+                    if target_device == device_id:
+                        for msg in messages:
+                            try:
+                                await ws.send_json(msg)
+                                logger.info(f"Delivered queued message from {from_device} to {device_id}")
+                            except RuntimeError:
+                                pass
+                        self.message_queue[pairing_id].pop(from_device, None)
+                if not self.message_queue[pairing_id]:
+                    self.message_queue.pop(pairing_id, None)
+
+            # Notify if both devices are now connected
+            if len(self.connections[pairing_id]) == 2:
+                peer_connected_msg = {"type": "peer_connected"}
+                for dev_id, sock in self.connections[pairing_id].items():
+                    try:
+                        await sock.send_json(peer_connected_msg)
+                        logger.info(f"Sent peer_connected to {dev_id}")
+                    except RuntimeError:
+                        pass
+
     async def disconnect(self, pairing_id: str, device_id: str) -> None:
         async with self.lock:
             if pairing_id in self.connections:
                 self.connections[pairing_id].pop(device_id, None)
                 if not self.connections[pairing_id]:
                     self.connections.pop(pairing_id, None)
+                    # Clean up message queue
+                    self.message_queue.pop(pairing_id, None)
 
     async def send_to_peer(self, pairing_id: str, from_device_id: str, payload: dict[str, Any]) -> bool:
-        """Send message to peer device. Returns True if delivered."""
+        """Send message to peer device. Returns True if delivered or queued."""
         async with self.lock:
             if pairing_id not in self.connections:
+                logger.warning(f"Pairing {pairing_id} not in connections. Available: {list(self.connections.keys())}")
                 return False
 
             devices = list(self.connections[pairing_id].keys())
             target_device = next((d for d in devices if d != from_device_id), None)
 
             if not target_device:
-                return False
+                logger.warning(f"No peer found for {from_device_id} in pairing {pairing_id}. Connected devices: {devices}")
+                # Queue the message for when peer connects
+                if pairing_id not in self.message_queue:
+                    self.message_queue[pairing_id] = {}
+                if from_device_id not in self.message_queue[pairing_id]:
+                    self.message_queue[pairing_id][from_device_id] = []
+                self.message_queue[pairing_id][from_device_id].append(payload)
+                logger.info(f"Queued message from {from_device_id} for peer in pairing {pairing_id}")
+                return True
 
             ws = self.connections[pairing_id][target_device]
 
         try:
             await ws.send_json(payload)
+            logger.info(f"Message relayed from {from_device_id} to {target_device}")
             return True
-        except RuntimeError:
+        except RuntimeError as e:
+            logger.error(f"Failed to send to {target_device}: {e}")
             await self.disconnect(pairing_id, target_device)
             return False
 
@@ -331,6 +370,11 @@ async def websocket_peer_connection(pairing_id: str, device_id: str, ws: WebSock
         while True:
             data = await ws.receive_json()
             msg_type = data.get("type")
+
+            # Handle keep-alive ping
+            if msg_type == "ping":
+                await ws.send_json({"type": "pong"})
+                continue
 
             # Relay messages to peer
             if msg_type in ["text", "file_init", "file_chunk", "file_end"]:
