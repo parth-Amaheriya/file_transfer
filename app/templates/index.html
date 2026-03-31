@@ -1,41 +1,51 @@
 {% extends "base.html" %}
-{% block title %}P2P Transfer · Dashboard{% endblock %}
+{% block title %}Transfer Hub · Sessions{% endblock %}
 {% block content %}
+<section class="card session-create">
+  <h2>Create session</h2>
+  <form class="inline-form" method="post" action="/ui/sessions">
+    <div class="inline-form__controls">
+      <input id="label" name="label" type="text" placeholder="Session label (optional)" />
+      <button type="submit">Create</button>
+    </div>
+  </form>
+</section>
+
 <section class="card pairing-card">
   <header class="section-head">
     <div>
-      <h2>Connect Two Devices</h2>
-      <p class="muted">Generate a 6-character code on Device A, enter it on Device B to establish a direct connection.</p>
+      <h2>Device pairing</h2>
+      <p class="muted">Generate a key on Device A, enter it on Device B to link channels.</p>
     </div>
   </header>
   <div class="pairing-grid">
     <div class="pairing-panel">
-      <h3>Device A • Generate Code</h3>
+      <h3>Device A · generate</h3>
       <form id="pairing-generate-form" class="pairing-form">
-        <label for="gen-identifier">Device Identifier *</label>
-        <input id="gen-identifier" name="device_identifier" type="text" placeholder="my-laptop" required />
-        <label for="gen-label">Device Label (optional)</label>
-        <input id="gen-label" name="device_label" type="text" placeholder="My Work Laptop" />
-        <button type="submit">Generate Pairing Code</button>
+        <label for="gen-identifier">Identifier</label>
+        <input id="gen-identifier" name="device_identifier" type="text" placeholder="device-a" required />
+        <label for="gen-label">Label (optional)</label>
+        <input id="gen-label" name="device_label" type="text" placeholder="Uploader laptop" />
+        <button type="submit">Generate key</button>
       </form>
       <div class="pairing-result">
-        <p id="pairing-generate-status" class="muted">Fill in your device info and click generate.</p>
+        <p id="pairing-generate-status" class="muted">No key yet.</p>
         <div id="pairing-code-pill" class="pairing-code" hidden></div>
       </div>
     </div>
     <div class="pairing-panel">
-      <h3>Device B • Join with Code</h3>
+      <h3>Device B · join</h3>
       <form id="pairing-join-form" class="pairing-form">
-        <label for="join-code">Pairing Code *</label>
-        <input id="join-code" name="pairing_code" type="text" placeholder="ABC123" maxlength="6" required />
-        <label for="join-identifier">Device Identifier *</label>
-        <input id="join-identifier" name="device_identifier" type="text" placeholder="my-tablet" required />
-        <label for="join-label">Device Label (optional)</label>
-        <input id="join-label" name="device_label" type="text" placeholder="My Tablet" />
-        <button type="submit">Join Pairing</button>
+        <label for="join-code">Pairing code</label>
+        <input id="join-code" name="pairing_code" type="text" placeholder="8F2KQZ" required />
+        <label for="join-identifier">Identifier</label>
+        <input id="join-identifier" name="device_identifier" type="text" placeholder="device-b" required />
+        <label for="join-label">Label (optional)</label>
+        <input id="join-label" name="device_label" type="text" placeholder="Receiver tablet" />
+        <button type="submit">Join device</button>
       </form>
       <div class="pairing-result">
-        <p id="pairing-join-status" class="muted">Get a code from Device A and enter it above.</p>
+        <p id="pairing-join-status" class="muted">Waiting for code.</p>
       </div>
     </div>
   </div>
@@ -44,16 +54,25 @@
 <section class="card">
   <header class="section-head">
     <div>
-      <h2>How It Works</h2>
+      <h2>Sessions</h2>
+      <p class="muted">Newest first</p>
     </div>
   </header>
-  <ol style="line-height: 1.8; color: #666;">
-    <li><strong>Device A</strong> generates a unique 6-character pairing code (valid for 1 hour)</li>
-    <li><strong>Device A</strong> shares the code with Device B securely</li>
-    <li><strong>Device B</strong> enters the code to establish a direct P2P connection</li>
-    <li>Once paired, devices can exchange messages and files directly</li>
-    <li><strong>No data is stored on the server</strong> — all communication is direct</li>
-  </ol>
+  {% if sessions %}
+  <ul class="session-list">
+    {% for session in sessions %}
+    <li>
+      <div>
+        <strong>{{ session.label or ("Session " ~ session.id[:6]) }}</strong>
+        <p class="muted">{{ session.created_at.strftime('%Y-%m-%d %H:%M:%S') }}</p>
+      </div>
+      <a class="ghost" href="/sessions/{{ session.id }}">Open</a>
+    </li>
+    {% endfor %}
+  </ul>
+  {% else %}
+  <p class="muted">No sessions yet. Create one above to begin transferring data.</p>
+  {% endif %}
 </section>
 {% endblock %}
 
@@ -65,8 +84,6 @@
   const joinStatus = document.getElementById("pairing-join-status");
   const codePill = document.getElementById("pairing-code-pill");
   let stopPairingWatcher = null;
-  let currentPairingId = null;
-  let currentDeviceId = null;
 
   const field = (form, name) => form?.elements.namedItem(name);
   const value = (form, name) => (field(form, name)?.value || "").trim();
@@ -85,18 +102,7 @@
     return response.json();
   };
 
-  const goToChat = (pairingId, deviceId, currentDeviceInfo, peerDevice) => {
-    // Store pairing info in sessionStorage
-    console.log('Storing chat data:', { pairingId, deviceId, currentDeviceInfo, peerDevice });
-    sessionStorage.setItem('pairing_id', pairingId);
-    sessionStorage.setItem('device_id', deviceId);
-    sessionStorage.setItem('peer_device', JSON.stringify(peerDevice));
-    sessionStorage.setItem('current_device', JSON.stringify(currentDeviceInfo));
-    // Navigate to chat
-    window.location.href = '/chat';
-  };
-
-  const watchPairingStatus = (code, deviceId, MyDevice) => {
+  const watchPairingStatus = (code, deviceId, currentDevice) => {
     if (stopPairingWatcher) {
       stopPairingWatcher();
     }
@@ -104,6 +110,10 @@
     stopPairingWatcher = () => {
       stopped = true;
     };
+    
+    // Store current device info for later use
+    currentDeviceId = deviceId;
+    currentPairingId = null;
 
     const poll = async () => {
       if (stopped) return;
@@ -111,19 +121,18 @@
         const response = await fetch(`/api/pairing/${encodeURIComponent(code)}`);
         if (response.ok) {
           const data = await response.json();
+          currentPairingId = data.id;
           if (data.status === "connected") {
             const peer = describeDevice(data.peer);
+            generateStatus.textContent = `Device B connected (${peer}). `;
+            
             const chatBtn = document.createElement('button');
             chatBtn.textContent = `💬 Go to Chat`;
             chatBtn.className = 'ghost';
-            chatBtn.onclick = () => goToChat(data.id, deviceId, MyDevice, data.peer);
-            chatBtn.style.marginLeft = '10px';
-            
-            generateStatus.innerHTML = `✓ Connected! Device B (${peer}) has joined. `;
+            chatBtn.onclick = () => goToChat(data.id, deviceId, currentDevice, data.peer);
             generateStatus.appendChild(chatBtn);
+            
             stopPairingWatcher();
-            currentPairingId = data.id;
-            currentDeviceId = deviceId;
             return;
           }
         }
@@ -140,23 +149,22 @@
 
   generatorForm?.addEventListener("submit", async (event) => {
     event.preventDefault();
-    generateStatus.textContent = "Generating pairing code...";
+    generateStatus.textContent = "Generating key...";
     codePill.hidden = true;
     try {
-      const deviceId = value(generatorForm, "device_identifier");
       const payload = {
         device: {
-          identifier: deviceId,
+          identifier: value(generatorForm, "device_identifier"),
           label: value(generatorForm, "device_label") || null,
         },
       };
-      const data = await postJson("/api/pairing/initiate", payload);
+      const data = await postJson("/api/pairings", payload);
       codePill.textContent = data.code;
       codePill.hidden = false;
-      generateStatus.textContent = `Code generated! Share with Device B. Waiting for connection...`;
-      watchPairingStatus(data.code, deviceId, payload.device);
+      generateStatus.textContent = `Share this code with Device B (${data.status}). Waiting for connection...`;
+      watchPairingStatus(data.code);
     } catch (error) {
-      generateStatus.textContent = `Error: ${error.message || "Failed to generate code"}`;
+      generateStatus.textContent = error.message || "Failed to generate key.";
       if (stopPairingWatcher) {
         stopPairingWatcher();
         stopPairingWatcher = null;
@@ -166,31 +174,20 @@
 
   joinForm?.addEventListener("submit", async (event) => {
     event.preventDefault();
-    joinStatus.textContent = "Joining pairing...";
+    joinStatus.textContent = "Submitting...";
     try {
-      const deviceId = value(joinForm, "device_identifier");
-      const deviceLabel = value(joinForm, "device_label");
-      const currentDevice = {
-        identifier: deviceId,
-        label: deviceLabel || null,
-      };
       const payload = {
-        device: currentDevice,
+        device: {
+          identifier: value(joinForm, "device_identifier"),
+          label: value(joinForm, "device_label") || null,
+        },
       };
       const code = value(joinForm, "pairing_code");
-      const data = await postJson(`/api/pairing/join/${encodeURIComponent(code)}`, payload);
+      const data = await postJson(`/api/pairings/${encodeURIComponent(code)}/join`, payload);
       const partner = data.initiator.label || data.initiator.identifier;
-      
-      const chatBtn = document.createElement('button');
-      chatBtn.textContent = `💬 Go to Chat`;
-      chatBtn.className = 'ghost';
-      chatBtn.onclick = () => goToChat(data.id, deviceId, currentDevice, data.initiator);
-      chatBtn.style.marginLeft = '10px';
-      
-      joinStatus.innerHTML = `✓ Successfully connected to ${partner}! `;
-      joinStatus.appendChild(chatBtn);
+      joinStatus.textContent = `Connected to ${partner}. Status: ${data.status}.`;
     } catch (error) {
-      joinStatus.textContent = `Error: ${error.message || "Failed to join pairing"}`;
+      joinStatus.textContent = error.message || "Failed to join key.";
     }
   });
 </script>
