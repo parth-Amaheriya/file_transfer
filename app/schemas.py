@@ -16,7 +16,7 @@ class PairingCodeCreate(BaseModel):
 
 class PairingCodeJoin(BaseModel):
     device: DeviceDescriptor
-    code: str
+    # Note: code is passed in the URL path, not in the request body
 
 
 class PairingCodeOut(BaseModel):
