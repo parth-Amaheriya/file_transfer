@@ -11,7 +11,7 @@
   </div>
 
   <div class="chat-messages" id="messages-container">
-    <p class="muted" style="text-align: center; padding: 20px;">Waiting for messages...</p>
+    <p class="muted" style="text-align: center; padding: 20px;">✏️ Connecting to peer device...</p>
   </div>
 
   <div class="chat-input-area">
@@ -21,8 +21,9 @@
           id="message-input" 
           placeholder="Type a message (Shift+Enter to send)..." 
           rows="2"
+          disabled
         ></textarea>
-        <button type="submit" class="btn-send">Send</button>
+        <button type="submit" class="btn-send" id="send-btn">Send</button>
       </div>
     </form>
   </div>
@@ -83,14 +84,8 @@
 }
 
 @keyframes slideIn {
-  from {
-    opacity: 0;
-    transform: translateY(10px);
-  }
-  to {
-    opacity: 1;
-    transform: translateY(0);
-  }
+  from { opacity: 0; transform: translateY(10px); }
+  to { opacity: 1; transform: translateY(0); }
 }
 
 .message.sent {
@@ -155,6 +150,12 @@
   box-shadow: 0 0 0 3px rgba(0, 123, 255, 0.1);
 }
 
+#message-input:disabled {
+  background: #f5f5f5;
+  color: #999;
+  cursor: not-allowed;
+}
+
 .btn-send {
   padding: 10px 20px;
   background: #007bff;
@@ -167,8 +168,13 @@
   transition: background 0.2s;
 }
 
-.btn-send:hover {
+.btn-send:hover:not(:disabled) {
   background: #0056b3;
+}
+
+.btn-send:disabled {
+  background: #ccc;
+  cursor: not-allowed;
 }
 
 .error-message {
@@ -190,18 +196,39 @@
   let deviceId = null;
   let peerDevice = null;
   
-  // Get pairing ID and device ID from URL or sessionStorage
   function initializeChat() {
+    console.log('=== Chat Initialization Started ===');
+    console.log('URL:', window.location.href);
+    console.log('SessionStorage:', {
+      pairing_id: sessionStorage.getItem('pairing_id'),
+      device_id: sessionStorage.getItem('device_id'),
+      peer_device: sessionStorage.getItem('peer_device')
+    });
+    
+    // Get pairing info from URL or sessionStorage
     const params = new URLSearchParams(window.location.search);
     pairingId = params.get('pairing_id') || sessionStorage.getItem('pairing_id');
     deviceId = params.get('device_id') || sessionStorage.getItem('device_id');
-    peerDevice = JSON.parse(sessionStorage.getItem('peer_device') || '{}');
+    const peerDeviceStr = sessionStorage.getItem('peer_device');
+    
+    console.log('Extracted:', { pairingId, deviceId, peerDeviceStr });
     
     if (!pairingId || !deviceId) {
-      showError('Missing pairing information. <a href="/">Go back to create a new pairing.</a>');
+      console.error('Missing pairing or device ID');
+      showError('❌ No pairing found. <a href="/">Click here to create one</a>.');
       return;
     }
     
+    try {
+      peerDevice = peerDeviceStr ? JSON.parse(peerDeviceStr) : {};
+    } catch (e) {
+      console.warn('Failed to parse peer device:', e);
+      peerDevice = {};
+    }
+    
+    console.log('Peer Device:', peerDevice);
+    
+    // Update UI
     document.getElementById('pairing-id-display').textContent = pairingId.substring(0, 8) + '...';
     document.getElementById('peer-name').textContent = peerDevice.label || peerDevice.identifier || 'Connected Device';
     
@@ -212,41 +239,62 @@
     const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
     const wsUrl = `${protocol}//${window.location.host}/ws/pairing/${encodeURIComponent(pairingId)}/${encodeURIComponent(deviceId)}`;
     
-    ws = new WebSocket(wsUrl);
+    console.log('Connecting to WebSocket:', wsUrl);
+    addSystemMessage('⏳ Connecting to peer device...');
+    
+    try {
+      ws = new WebSocket(wsUrl);
+    } catch (error) {
+      console.error('WebSocket creation failed:', error);
+      addSystemMessage('❌ Failed to create WebSocket', 'error');
+      return;
+    }
     
     ws.onopen = () => {
-      console.log('WebSocket connected');
-      addSystemMessage('Connected to peer device');
+      console.log('✅ WebSocket connected!');
+      addSystemMessage('✅ Connected to peer device - ready to chat!');
+      document.getElementById('message-input').disabled = false;
+      document.getElementById('message-input').focus();
     };
     
     ws.onmessage = (event) => {
-      const data = JSON.parse(event.data);
-      handleMessage(data);
+      console.log('Message received:', event.data);
+      try {
+        const data = JSON.parse(event.data);
+        handleMessage(data);
+      } catch (e) {
+        console.error('Failed to parse message:', e);
+        addSystemMessage('⚠️ Received invalid message format', 'error');
+      }
     };
     
     ws.onerror = (error) => {
-      console.error('WebSocket error:', error);
-      addSystemMessage('Connection error. Trying to reconnect...', 'error');
+      console.error('❌ WebSocket error:', error);
+      addSystemMessage('❌ Connection error: ' + error.message, 'error');
+      document.getElementById('message-input').disabled = true;
     };
     
     ws.onclose = () => {
       console.log('WebSocket closed');
-      addSystemMessage('Disconnected from peer device', 'error');
+      addSystemMessage('⏹️ Disconnected from peer', 'error');
       document.getElementById('message-input').disabled = true;
     };
   }
   
   function handleMessage(data) {
+    console.log('Handling message:', data);
     const msgType = data.type;
     
     if (msgType === 'text') {
-      addMessage(data.content, 'received', data.sender);
+      addMessage(data.content, 'received');
     } else if (msgType === 'error') {
-      addSystemMessage(`Error: ${data.message}`, 'error');
+      addSystemMessage('⚠️ ' + data.message, 'error');
     } else if (msgType === 'file_init') {
-      addSystemMessage(`📁 Receiving file: ${data.file_name} (${formatSize(data.file_size)})`);
+      addSystemMessage('📁 Receiving: ' + data.file_name, 'info');
     } else if (msgType === 'file_end') {
-      addSystemMessage(`✅ File received: ${data.file_name}`);
+      addSystemMessage('✅ Received: ' + data.file_name, 'info');
+    } else {
+      console.warn('Unknown message type:', msgType);
     }
   }
   
@@ -256,31 +304,37 @@
     const content = input.value.trim();
     
     if (!content) return;
+    
     if (!ws || ws.readyState !== WebSocket.OPEN) {
-      addSystemMessage('Not connected to peer', 'error');
+      console.error('WebSocket not open. State:', ws?.readyState);
+      addSystemMessage('❌ Not connected. Attempting to reconnect...', 'error');
+      connectWebSocket();
       return;
     }
     
-    const message = {
-      type: 'text',
-      content: content
-    };
+    console.log('Sending message:', content);
+    const message = { type: 'text', content: content };
     
-    ws.send(JSON.stringify(message));
-    addMessage(content, 'sent');
-    input.value = '';
-    input.focus();
+    try {
+      ws.send(JSON.stringify(message));
+      addMessage(content, 'sent');
+      input.value = '';
+      input.focus();
+    } catch (error) {
+      console.error('Send error:', error);
+      addSystemMessage('❌ Failed to send message', 'error');
+    }
   }
   
-  function addMessage(content, type = 'received', sender = null) {
+  function addMessage(content, type = 'received') {
     const container = document.getElementById('messages-container');
     
-    // Remove "waiting for messages" placeholder on first message
+    // Remove placeholder
     const placeholder = container.querySelector('.muted');
     if (placeholder) placeholder.remove();
     
     const messageDiv = document.createElement('div');
-    messageDiv.className = `message ${type}`;
+    messageDiv.className = 'message ' + type;
     
     const bubble = document.createElement('div');
     bubble.className = 'message-bubble';
@@ -294,8 +348,9 @@
     messageDiv.appendChild(time);
     container.appendChild(messageDiv);
     
-    // Auto-scroll to bottom
-    container.scrollTop = container.scrollHeight;
+    setTimeout(() => {
+      container.scrollTop = container.scrollHeight;
+    }, 0);
   }
   
   function addSystemMessage(content, type = 'info') {
@@ -303,52 +358,39 @@
     const msgDiv = document.createElement('div');
     msgDiv.style.cssText = `
       text-align: center;
-      color: #999;
-      font-size: 0.9em;
       padding: 10px;
+      font-size: 0.9em;
       font-style: italic;
+      ${type === 'error' ? 'color: #d32f2f;' : 'color: #666;'}
     `;
-    if (type === 'error') {
-      msgDiv.style.color = '#d32f2f';
-    }
     msgDiv.innerHTML = content;
     container.appendChild(msgDiv);
     container.scrollTop = container.scrollHeight;
   }
   
   function showError(message) {
-    const container = document.querySelector('main.content');
-    container.innerHTML = `<div class="error-message">${message}</div>`;
+    const main = document.querySelector('main.content');
+    main.innerHTML = `<div class="error-message">${message}</div>`;
   }
   
   function disconnectPairing() {
-    if (ws) {
-      ws.close();
-    }
-    sessionStorage.removeItem('pairing_id');
-    sessionStorage.removeItem('device_id');
-    sessionStorage.removeItem('peer_device');
+    console.log('Disconnecting...');
+    if (ws) ws.close();
+    sessionStorage.clear();
     window.location.href = '/';
   }
   
-  function formatSize(bytes) {
-    if (!bytes) return '0 B';
-    const units = ['B', 'KB', 'MB', 'GB'];
-    let size = bytes;
-    let unitIdx = 0;
-    while (size >= 1024 && unitIdx < units.length - 1) {
-      size /= 1024;
-      unitIdx++;
-    }
-    return size.toFixed(1) + ' ' + units[unitIdx];
+  // Initialize on page load
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', initializeChat);
+  } else {
+    initializeChat();
   }
   
-  // Initialize when page loads
-  document.addEventListener('DOMContentLoaded', initializeChat);
-  
-  // Handle Shift+Enter to send message
-  document.getElementById('message-input')?.addEventListener('keydown', (e) => {
-    if (e.key === 'Enter' && e.shiftKey) {
+  // Handle Shift+Enter to send
+  document.addEventListener('keydown', (e) => {
+    if (e.target.id === 'message-input' && e.key === 'Enter' && e.shiftKey) {
+      e.preventDefault();
       sendMessage(e);
     }
   });
