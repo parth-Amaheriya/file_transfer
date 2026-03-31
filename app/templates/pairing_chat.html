@@ -17,15 +17,24 @@
   <div class="chat-input-area">
     <form id="message-form" onsubmit="sendMessage(event)">
       <div class="input-group">
+        <div class="input-controls">
+          <button type="button" class="btn-code" id="code-btn" onclick="toggleCodeMode()">💻 Code</button>
+        </div>
         <textarea 
           id="message-input" 
-          placeholder="Type a message (Shift+Enter to send)..." 
+          placeholder="Type a message or paste code..." 
           rows="2"
           disabled
         ></textarea>
         <button type="submit" class="btn-send" id="send-btn">Send</button>
       </div>
     </form>
+    <div class="file-upload-area" id="file-upload-area">
+      <input type="file" id="file-input" multiple style="display: none;" />
+      <button type="button" class="btn-upload" onclick="document.getElementById('file-input').click()">📎 Attach Files</button>
+      <span class="upload-hint">or drag & drop files here</span>
+      <div id="file-preview" class="file-preview"></div>
+    </div>
   </div>
 </div>
 
@@ -116,6 +125,26 @@
   border-radius: 4px 12px 12px 12px;
 }
 
+.code-message {
+  font-family: 'Courier New', monospace;
+  font-size: 0.9em;
+  white-space: pre-wrap;
+  word-wrap: break-word;
+  background: #f8f9fa !important;
+  border: 1px solid #e9ecef;
+  padding: 8px !important;
+}
+
+.code-message pre {
+  margin: 0;
+  white-space: pre-wrap;
+}
+
+.code-message code {
+  background: none;
+  padding: 0;
+}
+
 .message-time {
   font-size: 0.75em;
   color: #999;
@@ -132,6 +161,31 @@
 .input-group {
   display: flex;
   gap: 10px;
+  flex-direction: column;
+}
+
+.input-controls {
+  display: flex;
+  gap: 5px;
+}
+
+.btn-code {
+  padding: 4px 8px;
+  background: #6c757d;
+  color: white;
+  border: none;
+  border-radius: 4px;
+  cursor: pointer;
+  font-size: 0.8em;
+  transition: background 0.2s;
+}
+
+.btn-code:hover {
+  background: #5a6268;
+}
+
+.btn-code.active {
+  background: #007bff;
 }
 
 #message-input {
@@ -177,6 +231,72 @@
   cursor: not-allowed;
 }
 
+.btn-upload {
+  padding: 8px 16px;
+  background: #28a745;
+  color: white;
+  border: none;
+  border-radius: 6px;
+  cursor: pointer;
+  font-size: 0.9em;
+  font-weight: 500;
+  transition: background 0.2s;
+  margin-top: 10px;
+}
+
+.btn-upload:hover {
+  background: #218838;
+}
+
+.file-upload-area {
+  margin-top: 10px;
+  padding: 10px;
+  border: 2px dashed #ddd;
+  border-radius: 6px;
+  background: #fafafa;
+  transition: border-color 0.2s;
+}
+
+.file-upload-area.dragover {
+  border-color: #007bff;
+  background: #f0f8ff;
+}
+
+.upload-hint {
+  font-size: 0.8em;
+  color: #666;
+  margin-left: 10px;
+}
+
+.file-preview {
+  margin-top: 10px;
+}
+
+.file-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px;
+  background: #f8f9fa;
+  border-radius: 4px;
+  margin-bottom: 5px;
+}
+
+.file-item span {
+  flex: 1;
+  font-size: 0.9em;
+}
+
+.file-item button {
+  background: #dc3545;
+  color: white;
+  border: none;
+  border-radius: 4px;
+  padding: 4px 8px;
+  cursor: pointer;
+  font-size: 0.8em;
+}
+
 .error-message {
   background: #fee;
   color: #c33;
@@ -195,6 +315,26 @@
   let pairingId = null;
   let deviceId = null;
   let peerDevice = null;
+  let isCodeMode = false;
+  
+  function toggleCodeMode() {
+    isCodeMode = !isCodeMode;
+    const input = document.getElementById('message-input');
+    const btn = document.getElementById('code-btn');
+    
+    if (isCodeMode) {
+      btn.classList.add('active');
+      input.placeholder = 'Paste your code here...';
+      input.style.fontFamily = 'monospace';
+      input.rows = 6;
+    } else {
+      btn.classList.remove('active');
+      input.placeholder = 'Type a message or paste code...';
+      input.style.fontFamily = '';
+      input.rows = 2;
+    }
+    input.focus();
+  }
   
   function initializeChat() {
     console.log('=== Chat Initialization Started ===');
@@ -233,6 +373,124 @@
     document.getElementById('peer-name').textContent = peerDevice.label || peerDevice.identifier || 'Connected Device';
     
     connectWebSocket();
+  }
+  
+  // File input handler
+  document.getElementById('file-input').addEventListener('change', handleFileSelect);
+  
+  // Drag and drop handlers
+  const uploadArea = document.getElementById('file-upload-area');
+  uploadArea.addEventListener('dragover', (e) => {
+    e.preventDefault();
+    uploadArea.classList.add('dragover');
+  });
+  uploadArea.addEventListener('dragleave', () => {
+    uploadArea.classList.remove('dragover');
+  });
+  uploadArea.addEventListener('drop', (e) => {
+    e.preventDefault();
+    uploadArea.classList.remove('dragover');
+    const files = Array.from(e.dataTransfer.files);
+    selectedFiles = [...selectedFiles, ...files];
+    updateFilePreview();
+  });
+  
+  function handleFileSelect(event) {
+    const files = Array.from(event.target.files);
+    selectedFiles = files;
+    updateFilePreview();
+  }
+  
+  function updateFilePreview() {
+    const preview = document.getElementById('file-preview');
+    preview.innerHTML = '';
+    selectedFiles.forEach((file, index) => {
+      const item = document.createElement('div');
+      item.className = 'file-item';
+      item.innerHTML = `
+        <span>📄 ${file.name} (${formatFileSize(file.size)})</span>
+        <button onclick="removeFile(${index})">Remove</button>
+      `;
+      preview.appendChild(item);
+    });
+  }
+  
+  function removeFile(index) {
+    selectedFiles.splice(index, 1);
+    updateFilePreview();
+  }
+  
+  function formatFileSize(bytes) {
+    if (bytes === 0) return '0 Bytes';
+    const k = 1024;
+    const sizes = ['Bytes', 'KB', 'MB', 'GB'];
+    const i = Math.floor(Math.log(bytes) / Math.log(k));
+    return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
+  }
+  
+  async function uploadFile(file) {
+    const formData = new FormData();
+    formData.append('file', file);
+    
+    try {
+      const response = await fetch(`/api/pairing/${encodeURIComponent(pairingId)}/files`, {
+        method: 'POST',
+        body: formData
+      });
+      
+      if (!response.ok) {
+        throw new Error(`Upload failed: ${response.status}`);
+      }
+      
+      const result = await response.json();
+      console.log('File uploaded:', result);
+      
+      // Send file shared message
+      const message = {
+        type: 'file_shared',
+        filename: file.name,
+        size: file.size
+      };
+      
+      if (ws && ws.readyState === WebSocket.OPEN) {
+        ws.send(JSON.stringify(message));
+        addFileMessage(file.name, file.size, 'sent');
+      }
+      
+    } catch (error) {
+      console.error('Upload error:', error);
+      addSystemMessage('❌ Failed to upload file: ' + error.message, 'error');
+    }
+  }
+  
+  function addFileMessage(filename, size, type = 'received') {
+    const container = document.getElementById('messages-container');
+    
+    // Remove placeholder
+    const placeholder = container.querySelector('.muted');
+    if (placeholder) placeholder.remove();
+    
+    const messageDiv = document.createElement('div');
+    messageDiv.className = 'message ' + type;
+    
+    const bubble = document.createElement('div');
+    bubble.className = 'message-bubble';
+    bubble.innerHTML = `
+      📄 <strong>${filename}</strong> (${formatFileSize(size)})<br>
+      <a href="/api/pairing/${encodeURIComponent(pairingId)}/files/${encodeURIComponent(filename)}" target="_blank" style="color: #007bff;">Download</a>
+    `;
+    
+    const time = document.createElement('div');
+    time.className = 'message-time';
+    time.textContent = new Date().toLocaleTimeString();
+    
+    messageDiv.appendChild(bubble);
+    messageDiv.appendChild(time);
+    container.appendChild(messageDiv);
+    
+    setTimeout(() => {
+      container.scrollTop = container.scrollHeight;
+    }, 0);
   }
   
   function connectWebSocket() {
@@ -304,11 +562,13 @@
     const msgType = data.type;
     
     if (msgType === 'text') {
-      addMessage(data.content, 'received');
+      addMessage(data.content, 'received', data.isCode);
     } else if (msgType === 'error') {
       addSystemMessage('⚠️ ' + data.message, 'error');
     } else if (msgType === 'peer_connected') {
       addSystemMessage('✅ Peer device connected!', 'info');
+    } else if (msgType === 'file_shared') {
+      addFileMessage(data.filename, data.size, 'received');
     } else if (msgType === 'file_init') {
       addSystemMessage('📁 Receiving: ' + data.file_name, 'info');
     } else if (msgType === 'file_end') {
@@ -323,30 +583,43 @@
     const input = document.getElementById('message-input');
     const content = input.value.trim();
     
-    if (!content) return;
-    
-    if (!ws || ws.readyState !== WebSocket.OPEN) {
-      console.error('WebSocket not open. State:', ws?.readyState);
-      addSystemMessage('❌ Not connected. Attempting to reconnect...', 'error');
-      connectWebSocket();
-      return;
+    // Send text message if any
+    if (content) {
+      if (!ws || ws.readyState !== WebSocket.OPEN) {
+        console.error('WebSocket not open. State:', ws?.readyState);
+        addSystemMessage('❌ Not connected. Attempting to reconnect...', 'error');
+        connectWebSocket();
+        return;
+      }
+      
+      console.log('Sending message:', content);
+      const message = { type: 'text', content: content, isCode: isCodeMode };
+      
+      try {
+        ws.send(JSON.stringify(message));
+        addMessage(content, 'sent', isCodeMode);
+        input.value = '';
+        // Reset code mode after sending
+        if (isCodeMode) {
+          toggleCodeMode();
+        }
+      } catch (error) {
+        console.error('Send error:', error);
+        addSystemMessage('❌ Failed to send message', 'error');
+      }
     }
     
-    console.log('Sending message:', content);
-    const message = { type: 'text', content: content };
-    
-    try {
-      ws.send(JSON.stringify(message));
-      addMessage(content, 'sent');
-      input.value = '';
-      input.focus();
-    } catch (error) {
-      console.error('Send error:', error);
-      addSystemMessage('❌ Failed to send message', 'error');
+    // Send files if any
+    if (selectedFiles.length > 0) {
+      selectedFiles.forEach(file => uploadFile(file));
+      selectedFiles = [];
+      updateFilePreview();
     }
+    
+    input.focus();
   }
   
-  function addMessage(content, type = 'received') {
+  function addMessage(content, type = 'received', forceCode = false) {
     const container = document.getElementById('messages-container');
     
     // Remove placeholder
@@ -358,7 +631,14 @@
     
     const bubble = document.createElement('div');
     bubble.className = 'message-bubble';
-    bubble.textContent = content;
+    
+    // Check if content looks like code or is marked as code
+    if (forceCode || isCodeContent(content)) {
+      bubble.innerHTML = `<pre><code>${escapeHtml(content)}</code></pre>`;
+      bubble.classList.add('code-message');
+    } else {
+      bubble.textContent = content;
+    }
     
     const time = document.createElement('div');
     time.className = 'message-time';
@@ -371,6 +651,18 @@
     setTimeout(() => {
       container.scrollTop = container.scrollHeight;
     }, 0);
+  }
+  
+  function isCodeContent(content) {
+    return content.includes('\n') || 
+           content.includes('  ') || 
+           /\b(function|class|def|const|let|var|import|if|for|while)\b/.test(content);
+  }
+  
+  function escapeHtml(text) {
+    const div = document.createElement('div');
+    div.textContent = text;
+    return div.innerHTML;
   }
   
   function addSystemMessage(content, type = 'info') {
