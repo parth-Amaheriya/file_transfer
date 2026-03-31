@@ -102,6 +102,17 @@
     return response.json();
   };
 
+  const goToChat = (pairingId, deviceId, currentDeviceInfo, peerDevice) => {
+    // Store pairing info in sessionStorage
+    console.log('Storing chat data:', { pairingId, deviceId, currentDeviceInfo, peerDevice });
+    sessionStorage.setItem('pairing_id', pairingId);
+    sessionStorage.setItem('device_id', deviceId);
+    sessionStorage.setItem('peer_device', JSON.stringify(peerDevice));
+    sessionStorage.setItem('current_device', JSON.stringify(currentDeviceInfo));
+    // Navigate to chat
+    window.location.href = '/chat';
+  };
+
   const watchPairingStatus = (code, deviceId, currentDevice) => {
     if (stopPairingWatcher) {
       stopPairingWatcher();
