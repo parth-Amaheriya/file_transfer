@@ -5,26 +5,29 @@ import errno
 import logging
 import secrets
 import tempfile
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Any
+from typing import Any, Optional
 from uuid import uuid4
 
 import aiofiles
-from fastapi import (FastAPI, File, Form, HTTPException, Request, UploadFile,
-                     WebSocket, WebSocketDisconnect)
-from fastapi.responses import RedirectResponse, StreamingResponse
+from fastapi import FastAPI, File, HTTPException, Request, UploadFile, WebSocket, WebSocketDisconnect
+from fastapi.responses import FileResponse, RedirectResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
-from pymongo import ReturnDocument
 
 from .config import get_settings
-from .db import get_collection
-from .schemas import (DeviceDescriptor, FileMeta, LogEntry, PairingKeyCreate,
-                      PairingKeyJoin, PairingKeyOut, SessionCreate, SessionOut)
+from .schemas import (
+    DeviceDescriptor,
+    FileTransferMessage,
+    PairingCodeCreate,
+    PairingCodeJoin,
+    PairingCodeOut,
+    TextMessage,
+)
 
 settings = get_settings()
-app = FastAPI(title="Transfer Hub", version="0.1.0")
+app = FastAPI(title="P2P Transfer", version="1.0.0")
 
 APP_DIR = Path(__file__).resolve().parent
 templates = Jinja2Templates(directory=str(APP_DIR / "templates"))
@@ -32,7 +35,7 @@ static_dir = APP_DIR / "static"
 static_dir.mkdir(parents=True, exist_ok=True)
 app.mount("/static", StaticFiles(directory=static_dir), name="static")
 
-logger = logging.getLogger("transfer_hub")
+logger = logging.getLogger("p2p_transfer")
 
 
 def _prepare_upload_root(raw_path: Path) -> Path:
@@ -54,327 +57,328 @@ def _prepare_upload_root(raw_path: Path) -> Path:
 
 uploads_root = _prepare_upload_root(Path(settings.uploads_path))
 
-_sessions = get_collection("sessions")
-_logs = get_collection("logs")
-_pairings = get_collection("pairings")
-
 PAIRING_CODE_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
 PAIRING_CODE_LENGTH = 6
 
 
+class PairingCode:
+    """In-memory pairing code with expiration"""
+
+    def __init__(
+        self,
+        code: str,
+        initiator: DeviceDescriptor,
+        ttl_seconds: int = 3600,
+    ):
+        self.id = uuid4().hex
+        self.code = code
+        self.status: str = "pending"
+        self.initiator = initiator
+        self.peer: Optional[DeviceDescriptor] = None
+        self.created_at = datetime.utcnow()
+        self.connected_at: Optional[datetime] = None
+        self.expires_at = self.created_at + timedelta(seconds=ttl_seconds)
+
+    def is_expired(self) -> bool:
+        return datetime.utcnow() > self.expires_at
+
+    def connect_peer(self, peer: DeviceDescriptor) -> None:
+        if self.status != "pending":
+            raise ValueError("Pairing is not pending")
+        if self.is_expired():
+            self.status = "expired"
+            raise ValueError("Pairing code expired")
+        self.peer = peer
+        self.status = "connected"
+        self.connected_at = datetime.utcnow()
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "id": self.id,
+            "code": self.code,
+            "status": self.status,
+            "initiator": self.initiator.model_dump(),
+            "peer": self.peer.model_dump() if self.peer else None,
+            "created_at": self.created_at,
+            "connected_at": self.connected_at,
+            "expires_at": self.expires_at,
+        }
+
+
+class PairingManager:
+    """Manage in-memory pairings with auto-cleanup"""
+
+    def __init__(self):
+        self.pairings: dict[str, PairingCode] = {}
+        self.codes: dict[str, PairingCode] = {}  # code -> PairingCode mapping
+        self.lock = asyncio.Lock()
+
+    async def create_pairing(self, device: DeviceDescriptor) -> PairingCode:
+        async with self.lock:
+            code = await self._generate_unique_code()
+            pairing = PairingCode(code, device, settings.pairing_code_ttl)
+            self.pairings[pairing.id] = pairing
+            self.codes[code] = pairing
+            return pairing
+
+    async def _generate_unique_code(self) -> str:
+        """Generate a unique pairing code"""
+        while True:
+            code = "".join(secrets.choice(PAIRING_CODE_ALPHABET) for _ in range(PAIRING_CODE_LENGTH))
+            if code not in self.codes:
+                return code
+
+    async def join_pairing(self, code: str, device: DeviceDescriptor) -> PairingCode:
+        async with self.lock:
+            normalized_code = code.strip().upper()
+            pairing = self.codes.get(normalized_code)
+
+            if not pairing:
+                raise HTTPException(status_code=404, detail="Pairing code not found")
+
+            if pairing.is_expired():
+                self.pause_pairing(pairing.id)
+                raise HTTPException(status_code=410, detail="Pairing code expired")
+
+            if pairing.status != "pending":
+                raise HTTPException(status_code=409, detail="Pairing code already used")
+
+            pairing.connect_peer(device)
+            return pairing
+
+    async def get_pairing(self, code: str) -> PairingCode:
+        normalized_code = code.strip().upper()
+        pairing = self.codes.get(normalized_code)
+
+        if not pairing:
+            raise HTTPException(status_code=404, detail="Pairing code not found")
+
+        if pairing.is_expired():
+            self.pause_pairing(pairing.id)
+            raise HTTPException(status_code=410, detail="Pairing code expired")
+
+        return pairing
+
+    async def get_pairing_by_id(self, pairing_id: str) -> PairingCode:
+        pairing = self.pairings.get(pairing_id)
+        if not pairing:
+            raise HTTPException(status_code=404, detail="Pairing not found")
+        if pairing.is_expired():
+            self.pause_pairing(pairing_id)
+            raise HTTPException(status_code=410, detail="Pairing expired")
+        return pairing
+
+    def pause_pairing(self, pairing_id: str) -> None:
+        """Remove expired pairing"""
+        pairing = self.pairings.pop(pairing_id, None)
+        if pairing:
+            self.codes.pop(pairing.code, None)
+
+    async def cleanup_expired(self) -> None:
+        """Periodic cleanup of expired pairings"""
+        async with self.lock:
+            expired_ids = [pid for pid, p in self.pairings.items() if p.is_expired()]
+            for pid in expired_ids:
+                self.pause_pairing(pid)
+
+
 class ConnectionManager:
-    def __init__(self) -> None:
-        self._rooms: dict[str, set[WebSocket]] = {}
-        self._lock = asyncio.Lock()
+    """Manage WebSocket connections between paired devices"""
 
-    async def connect(self, session_id: str, ws: WebSocket) -> None:
+    def __init__(self):
+        self.connections: dict[str, dict[str, WebSocket]] = {}  # pairing_id -> {device_id: ws}
+        self.lock = asyncio.Lock()
+
+    async def connect(self, pairing_id: str, device_id: str, ws: WebSocket) -> None:
         await ws.accept()
-        async with self._lock:
-            self._rooms.setdefault(session_id, set()).add(ws)
+        async with self.lock:
+            if pairing_id not in self.connections:
+                self.connections[pairing_id] = {}
+            self.connections[pairing_id][device_id] = ws
 
-    async def disconnect(self, session_id: str, ws: WebSocket) -> None:
-        async with self._lock:
-            sockets = self._rooms.get(session_id)
-            if not sockets:
+    async def disconnect(self, pairing_id: str, device_id: str) -> None:
+        async with self.lock:
+            if pairing_id in self.connections:
+                self.connections[pairing_id].pop(device_id, None)
+                if not self.connections[pairing_id]:
+                    self.connections.pop(pairing_id, None)
+
+    async def send_to_peer(self, pairing_id: str, from_device_id: str, payload: dict[str, Any]) -> bool:
+        """Send message to peer device. Returns True if delivered."""
+        async with self.lock:
+            if pairing_id not in self.connections:
+                return False
+
+            devices = list(self.connections[pairing_id].keys())
+            target_device = next((d for d in devices if d != from_device_id), None)
+
+            if not target_device:
+                return False
+
+            ws = self.connections[pairing_id][target_device]
+
+        try:
+            await ws.send_json(payload)
+            return True
+        except RuntimeError:
+            await self.disconnect(pairing_id, target_device)
+            return False
+
+    async def broadcast_pair(self, pairing_id: str, payload: dict[str, Any]) -> None:
+        """Send message to both devices in pair"""
+        async with self.lock:
+            if pairing_id not in self.connections:
                 return
-            sockets.discard(ws)
-            if not sockets:
-                self._rooms.pop(session_id, None)
 
-    async def broadcast(self, session_id: str, payload: dict[str, Any]) -> None:
-        sockets = list(self._rooms.get(session_id, set()))
+            sockets = list(self.connections[pairing_id].values())
+
         for ws in sockets:
             try:
                 await ws.send_json(payload)
             except RuntimeError:
-                await self.disconnect(session_id, ws)
+                pass
 
 
-manager = ConnectionManager()
+pairing_manager = PairingManager()
+connection_manager = ConnectionManager()
 
 
-async def _generate_pairing_code() -> str:
-    while True:
-        code = "".join(secrets.choice(PAIRING_CODE_ALPHABET) for _ in range(PAIRING_CODE_LENGTH))
-        exists = await _pairings.count_documents({"code": code}, limit=1)
-        if not exists:
-            return code
+# ============================================================================
+# REST API Endpoints
+# ============================================================================
 
 
-def normalize_pairing_code(code: str) -> str:
-    return code.strip().upper()
+@app.post("/api/pairing/initiate", response_model=PairingCodeOut)
+async def initiate_pairing(body: PairingCodeCreate) -> dict[str, Any]:
+    """Device A initiates a pairing and gets a code"""
+    pairing = await pairing_manager.create_pairing(body.device)
+    logger.info(f"Pairing initiated: {pairing.code} by {body.device.identifier}")
+    return pairing.to_dict()
 
 
-def serialize_pairing(doc: dict[str, Any]) -> PairingKeyOut:
-    initiator = DeviceDescriptor.model_validate(doc["initiator"])
-    peer_raw = doc.get("peer")
-    peer = DeviceDescriptor.model_validate(peer_raw) if peer_raw else None
-    return PairingKeyOut(
-        id=doc["_id"],
-        code=doc["code"],
-        status=doc.get("status", "pending"),
-        initiator=initiator,
-        peer=peer,
-        created_at=doc["created_at"],
-        connected_at=doc.get("connected_at"),
+@app.post("/api/pairing/join/{code}", response_model=PairingCodeOut)
+async def join_pairing(code: str, body: PairingCodeJoin) -> dict[str, Any]:
+    """Device B joins a pairing using the code"""
+    pairing = await pairing_manager.join_pairing(code, body.device)
+    logger.info(
+        f"Pairing joined: {code} by {body.device.identifier}. "
+        f"Connected: {pairing.initiator.identifier} <-> {body.device.identifier}"
     )
+    return pairing.to_dict()
 
 
-async def insert_pairing(device: DeviceDescriptor) -> dict[str, Any]:
-    doc = {
-        "_id": uuid4().hex,
-        "code": await _generate_pairing_code(),
-        "status": "pending",
-        "initiator": device.model_dump(),
-        "peer": None,
-        "created_at": datetime.utcnow(),
-        "connected_at": None,
-    }
-    await _pairings.insert_one(doc)
-    return doc
+@app.get("/api/pairing/{code}", response_model=PairingCodeOut)
+async def get_pairing_status(code: str) -> dict[str, Any]:
+    """Check pairing status"""
+    pairing = await pairing_manager.get_pairing(code)
+    return pairing.to_dict()
 
 
-async def connect_pairing(code: str, device: DeviceDescriptor) -> dict[str, Any]:
-    normalized_code = normalize_pairing_code(code)
-    doc = await _pairings.find_one_and_update(
-        {"code": normalized_code, "status": "pending"},
-        {
-            "$set": {
-                "peer": device.model_dump(),
-                "status": "connected",
-                "connected_at": datetime.utcnow(),
-            }
-        },
-        return_document=ReturnDocument.AFTER,
-    )
-    if doc:
-        return doc
+@app.post("/api/pairing/{pairing_id}/files")
+async def upload_to_peer(pairing_id: str, file: UploadFile = File(...)) -> dict[str, Any]:
+    """Upload file to send to peer (stores in temp location)"""
+    pairing = await pairing_manager.get_pairing_by_id(pairing_id)
+    if pairing.status != "connected":
+        raise HTTPException(status_code=409, detail="Pairing not connected")
 
-    existing = await _pairings.find_one({"code": normalized_code})
-    if not existing:
-        raise HTTPException(status_code=404, detail="Pairing key not found")
-    if existing.get("status") == "connected":
-        raise HTTPException(status_code=409, detail="Pairing key already used")
-    raise HTTPException(status_code=410, detail="Pairing key expired or invalid")
+    # Store file in pairing-specific directory
+    pairing_dir = uploads_root / pairing_id
+    pairing_dir.mkdir(parents=True, exist_ok=True)
+    target_path = pairing_dir / file.filename
 
-
-async def ensure_session(session_id: str) -> dict[str, Any]:
-    session = await _sessions.find_one({"_id": session_id})
-    if not session:
-        raise HTTPException(status_code=404, detail="Session not found")
-    return session
-
-
-def serialize_session(doc: dict[str, Any]) -> SessionOut:
-    return SessionOut(id=doc["_id"], label=doc.get("label"), created_at=doc["created_at"])
-
-
-async def append_log(session_id: str, kind: str, message: str, payload: dict | None = None) -> LogEntry:
-    entry_id = uuid4().hex
-    doc = {
-        "_id": entry_id,
-        "session_id": session_id,
-        "kind": kind,
-        "message": message,
-        "payload": payload,
-        "created_at": datetime.utcnow(),
-    }
-    await _logs.insert_one(doc)
-    log_entry = LogEntry(
-        id=entry_id,
-        session_id=session_id,
-        kind=kind,  # type: ignore[arg-type]
-        message=message,
-        payload=payload,
-        created_at=doc["created_at"],
-    )
-    await manager.broadcast(session_id, {"type": "log", "data": log_entry.model_dump()})
-    return log_entry
-
-
-async def insert_session(label: str | None) -> dict[str, Any]:
-    session_id = uuid4().hex
-    doc = {
-        "_id": session_id,
-        "label": label,
-        "created_at": datetime.utcnow(),
-    }
-    await _sessions.insert_one(doc)
-    await append_log(session_id, "info", "Session initialized", {"label": label})
-    return doc
-
-
-async def load_logs(session_id: str) -> list[LogEntry]:
-    await ensure_session(session_id)
-    cursor = _logs.find({"session_id": session_id}).sort("created_at", 1)
-    results: list[LogEntry] = []
-    async for doc in cursor:
-        results.append(
-            LogEntry(
-                id=doc["_id"],
-                session_id=session_id,
-                kind=doc.get("kind", "info"),  # type: ignore[arg-type]
-                message=doc.get("message", ""),
-                payload=doc.get("payload"),
-                created_at=doc["created_at"],
-            )
-        )
-    return results
-
-
-async def save_uploaded_file(session_id: str, file: UploadFile) -> FileMeta:
-    await ensure_session(session_id)
-    uploads_dir = uploads_root / session_id
-    uploads_dir.mkdir(parents=True, exist_ok=True)
-    target_path = uploads_dir / file.filename
     size = 0
     async with aiofiles.open(target_path, "wb") as out:
         while chunk := await file.read(1024 * 1024):
             size += len(chunk)
             await out.write(chunk)
-    meta = FileMeta(name=file.filename, size=size, mime_type=file.content_type)
-    await append_log(session_id, "info", "File stored", meta.model_dump())
-    return meta
+
+    logger.info(f"File uploaded for pairing {pairing_id}: {file.filename} ({size} bytes)")
+    return {"status": "uploaded", "filename": file.filename, "size": size}
 
 
-def _format_size(num: int) -> str:
-    units = ["B", "KB", "MB", "GB", "TB"]
-    value = float(num)
-    for unit in units:
-        if value < 1024 or unit == units[-1]:
-            if unit == "B":
-                return f"{int(value)} {unit}"
-            return f"{value:.1f} {unit}"
-        value /= 1024
-    return f"{value:.1f} PB"
+@app.get("/api/pairing/{pairing_id}/files/{filename}")
+async def download_from_peer(pairing_id: str, filename: str):
+    """Download file from peer"""
+    pairing = await pairing_manager.get_pairing_by_id(pairing_id)
+    if pairing.status != "connected":
+        raise HTTPException(status_code=409, detail="Pairing not connected")
 
-
-def list_session_files(session_id: str) -> list[dict[str, Any]]:
-    directory = uploads_root / session_id
-    if not directory.exists():
-        return []
-    files = []
-    for path in sorted(directory.iterdir(), key=lambda p: p.name.lower()):
-        if path.is_file():
-            size = path.stat().st_size
-            files.append({"name": path.name, "size": size, "display_size": _format_size(size)})
-    return files
-
-
-@app.post("/api/sessions", response_model=SessionOut)
-async def create_session(body: SessionCreate) -> SessionOut:
-    doc = await insert_session(body.label)
-    return serialize_session(doc)
-
-
-@app.get("/api/sessions", response_model=list[SessionOut])
-async def list_sessions() -> list[SessionOut]:
-    cursor = _sessions.find().sort("created_at", -1)
-    return [serialize_session(doc) async for doc in cursor]
-
-
-@app.get("/api/sessions/{session_id}", response_model=SessionOut)
-async def get_session(session_id: str) -> SessionOut:
-    doc = await ensure_session(session_id)
-    return serialize_session(doc)
-
-
-@app.get("/api/sessions/{session_id}/logs", response_model=list[LogEntry])
-async def fetch_logs(session_id: str) -> list[LogEntry]:
-    return await load_logs(session_id)
-
-
-@app.post("/api/pairings", response_model=PairingKeyOut)
-async def create_pairing_key(body: PairingKeyCreate) -> PairingKeyOut:
-    doc = await insert_pairing(body.device)
-    return serialize_pairing(doc)
-
-
-@app.post("/api/pairings/{code}/join", response_model=PairingKeyOut)
-async def join_pairing_key(code: str, body: PairingKeyJoin) -> PairingKeyOut:
-    doc = await connect_pairing(code, body.device)
-    return serialize_pairing(doc)
-
-
-@app.get("/api/pairings/{code}", response_model=PairingKeyOut)
-async def get_pairing_info(code: str) -> PairingKeyOut:
-    normalized_code = normalize_pairing_code(code)
-    doc = await _pairings.find_one({"code": normalized_code})
-    if not doc:
-        raise HTTPException(status_code=404, detail="Pairing key not found")
-    return serialize_pairing(doc)
-
-
-@app.post("/api/sessions/{session_id}/files")
-async def upload_file(session_id: str, file: UploadFile = File(...)) -> dict[str, Any]:
-    meta = await save_uploaded_file(session_id, file)
-    return {"status": "stored", "file": meta.model_dump()}
-
-
-@app.get("/api/sessions/{session_id}/files/{filename}")
-async def download_file(session_id: str, filename: str):
-    await ensure_session(session_id)
-    path = uploads_root / session_id / filename
+    path = uploads_root / pairing_id / filename
     if not path.exists():
         raise HTTPException(status_code=404, detail="File not found")
 
-    async def iterfile():
-        async with aiofiles.open(path, "rb") as stream:
-            while chunk := await stream.read(1024 * 512):
-                yield chunk
+    logger.info(f"File downloaded from pairing {pairing_id}: {filename}")
+    return FileResponse(path)
 
-    await append_log(session_id, "info", "File downloaded", {"name": filename})
-    return StreamingResponse(iterfile(), media_type="application/octet-stream")
+
+# ============================================================================
+# WebSocket Endpoints
+# ============================================================================
+
+
+@app.websocket("/ws/pairing/{pairing_id}/{device_id}")
+async def websocket_peer_connection(pairing_id: str, device_id: str, ws: WebSocket):
+    """WebSocket for P2P communication between paired devices"""
+    try:
+        pairing = await pairing_manager.get_pairing_by_id(pairing_id)
+        if pairing.status != "connected":
+            await ws.close(code=4000, reason="Pairing not connected")
+            return
+
+        await connection_manager.connect(pairing_id, device_id, ws)
+        logger.info(f"Device {device_id} connected to pairing {pairing_id}")
+
+        while True:
+            data = await ws.receive_json()
+            msg_type = data.get("type")
+
+            # Relay messages to peer
+            if msg_type in ["text", "file_init", "file_chunk", "file_end"]:
+                success = await connection_manager.send_to_peer(
+                    pairing_id, device_id, {"sender": device_id, **data}
+                )
+                if not success:
+                    await ws.send_json({"type": "error", "message": "Peer not connected"})
+            else:
+                await ws.send_json({"type": "error", "message": f"Unknown message type: {msg_type}"})
+
+    except WebSocketDisconnect:
+        await connection_manager.disconnect(pairing_id, device_id)
+        logger.info(f"Device {device_id} disconnected from pairing {pairing_id}")
+    except Exception as e:
+        logger.error(f"WebSocket error: {e}")
+        await connection_manager.disconnect(pairing_id, device_id)
+
+
+# ============================================================================
+# UI Endpoints
+# ============================================================================
 
 
 @app.get("/")
 async def dashboard(request: Request):
-    cursor = _sessions.find().sort("created_at", -1)
-    sessions = [serialize_session(doc) async for doc in cursor]
-    return templates.TemplateResponse(
-        "index.html",
-        {
-            "request": request,
-            "sessions": sessions,
-        },
-    )
+    """Dashboard to create or join pairing"""
+    return templates.TemplateResponse("index.html", {"request": request})
 
 
-@app.post("/ui/sessions")
-async def create_session_from_form(label: str = Form("")):
-    doc = await insert_session(label.strip() or None)
-    return RedirectResponse(url=f"/sessions/{doc['_id']}", status_code=303)
+@app.get("/chat")
+async def chat_page(request: Request):
+    """Chat interface for paired devices"""
+    return templates.TemplateResponse("pairing_chat.html", {"request": request})
 
 
-@app.get("/sessions/{session_id}")
-async def session_details(request: Request, session_id: str):
-    doc = await ensure_session(session_id)
-    session = serialize_session(doc)
-    logs = await load_logs(session_id)
-    files = list_session_files(session_id)
-    return templates.TemplateResponse(
-        "session_detail.html",
-        {
-            "request": request,
-            "session": session,
-            "logs": logs,
-            "files": files,
-        },
-    )
+# ============================================================================
+# Cleanup Task
+# ============================================================================
 
 
-@app.post("/sessions/{session_id}/upload")
-async def upload_from_form(session_id: str, file: UploadFile = File(...)):
-    await save_uploaded_file(session_id, file)
-    return RedirectResponse(url=f"/sessions/{session_id}", status_code=303)
-
-
-@app.websocket("/ws/logs/{session_id}")
-async def log_socket(session_id: str, ws: WebSocket):
-    await ensure_session(session_id)
-    await manager.connect(session_id, ws)
-    try:
+@app.on_event("startup")
+async def startup_cleanup():
+    """Start periodic cleanup of expired pairings"""
+    async def cleanup_task():
         while True:
-            await ws.receive_text()  # keep the socket alive even if client is passive
-    except WebSocketDisconnect:
-        await manager.disconnect(session_id, ws)
+            await asyncio.sleep(60)  # Run every minute
+            await pairing_manager.cleanup_expired()
+
+    asyncio.create_task(cleanup_task())
+

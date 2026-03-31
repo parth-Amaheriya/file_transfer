@@ -4,46 +4,22 @@ from typing import Any, Literal, Optional
 from pydantic import BaseModel, Field
 
 
-class SessionCreate(BaseModel):
-    label: Optional[str] = Field(None, max_length=80)
-
-
-class SessionOut(BaseModel):
-    id: str
-    label: Optional[str]
-    created_at: datetime
-
-
-class LogEntry(BaseModel):
-    id: str
-    session_id: str
-    kind: Literal["info", "warning", "error"] = "info"
-    message: str
-    payload: dict | None = None
-    created_at: datetime
-
-
-class FileMeta(BaseModel):
-    name: str
-    size: int
-    mime_type: Optional[str]
-
-
 class DeviceDescriptor(BaseModel):
-    identifier: str = Field(..., max_length=120)
-    label: Optional[str] = Field(None, max_length=120)
+    identifier: str = Field(..., max_length=120)  # Device ID (UUID)
+    label: Optional[str] = Field(None, max_length=120)  # Device name
     metadata: dict[str, Any] | None = None
 
 
-class PairingKeyCreate(BaseModel):
+class PairingCodeCreate(BaseModel):
     device: DeviceDescriptor
 
 
-class PairingKeyJoin(BaseModel):
+class PairingCodeJoin(BaseModel):
     device: DeviceDescriptor
+    code: str
 
 
-class PairingKeyOut(BaseModel):
+class PairingCodeOut(BaseModel):
     id: str
     code: str
     status: Literal["pending", "connected", "expired"] = "pending"
@@ -51,3 +27,19 @@ class PairingKeyOut(BaseModel):
     peer: Optional[DeviceDescriptor] = None
     created_at: datetime
     connected_at: Optional[datetime] = None
+    expires_at: datetime
+
+
+class FileTransferMessage(BaseModel):
+    type: Literal["file_init", "file_chunk", "file_end"]
+    file_name: str
+    file_size: Optional[int] = None
+    chunk_data: Optional[str] = None  # base64 encoded
+    chunk_size: Optional[int] = None
+    mime_type: Optional[str] = None
+
+
+class TextMessage(BaseModel):
+    type: Literal["text"]
+    content: str
+    timestamp: datetime = Field(default_factory=datetime.utcnow)

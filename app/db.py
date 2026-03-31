@@ -1,15 +1,10 @@
-from motor.motor_asyncio import AsyncIOMotorClient, AsyncIOMotorDatabase
+"""
+Database module - DEPRECATED
 
-from .config import get_settings
+This module is no longer used in the P2P architecture.
+All data is stored in-memory within PairingManager and ConnectionManager.
+No external database is required.
 
-_settings = get_settings()
-_client = AsyncIOMotorClient(_settings.mongo_uri)
-_db = _client[_settings.mongo_db]
+See app/main.py for the new architecture.
+"""
 
-
-def get_db() -> AsyncIOMotorDatabase:
-    return _db
-
-
-def get_collection(name: str):
-    return _db[name]

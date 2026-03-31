@@ -7,9 +7,9 @@ BASE_DIR = Path(__file__).resolve().parents[1]
 
 
 class Settings(BaseSettings):
-    mongo_uri: str = "mongodb://localhost:27017"
-    mongo_db: str = "transfer_hub"
     uploads_path: str = str(BASE_DIR / "uploads")
+    pairing_code_ttl: int = 3600  # 1 hour in seconds
+    max_connections: int = 100
 
     model_config = {
         "env_file": BASE_DIR / ".env",
