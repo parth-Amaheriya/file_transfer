@@ -37,7 +37,7 @@
       <h3>Device B · join</h3>
       <form id="pairing-join-form" class="pairing-form">
         <label for="join-code">Pairing code</label>
-        <input id="join-code" name="pairing_code" type="text" placeholder="8F2KQZ" required />
+        <input id="join-code" name="pairing_code" type="text" placeholder="8F2KQZ" maxlength="6" style="text-transform: uppercase;" required />
         <label for="join-identifier">Identifier</label>
         <input id="join-identifier" name="device_identifier" type="text" placeholder="device-b" required />
         <label for="join-label">Label (optional)</label>
@@ -197,7 +197,7 @@
       const payload = {
         device: currentDevice,
       };
-      const code = value(joinForm, "pairing_code");
+      const code = value(joinForm, "pairing_code").toUpperCase();
       const data = await postJson(`/api/pairing/join/${encodeURIComponent(code)}`, payload);
       const partner = data.initiator.label || data.initiator.identifier;
       
@@ -213,5 +213,13 @@
       joinStatus.textContent = `Error: ${error.message || "Failed to join pairing"}`;
     }
   });
+
+  // Auto-capitalize code input field
+  const codeInput = document.getElementById('join-code');
+  if (codeInput) {
+    codeInput.addEventListener('input', (e) => {
+      e.target.value = e.target.value.toUpperCase();
+    });
+  }
 </script>
 {% endblock %}

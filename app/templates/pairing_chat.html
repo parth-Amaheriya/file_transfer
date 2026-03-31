@@ -239,43 +239,61 @@
     const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
     const wsUrl = `${protocol}//${window.location.host}/ws/pairing/${encodeURIComponent(pairingId)}/${encodeURIComponent(deviceId)}`;
     
-    console.log('Connecting to WebSocket:', wsUrl);
+    console.log('🔌 Connecting to WebSocket:', wsUrl);
+    console.log('📍 Device Info:', { pairingId, deviceId, peerDevice });
     addSystemMessage('⏳ Connecting to peer device...');
     
     try {
       ws = new WebSocket(wsUrl);
     } catch (error) {
-      console.error('WebSocket creation failed:', error);
+      console.error('❌ WebSocket creation failed:', error);
       addSystemMessage('❌ Failed to create WebSocket', 'error');
       return;
     }
     
     ws.onopen = () => {
       console.log('✅ WebSocket connected!');
+      console.log('🔄 Device:', deviceId, 'is now connected to pairing:', pairingId.substring(0, 8));
       addSystemMessage('✅ Connected to peer device - ready to chat!');
       document.getElementById('message-input').disabled = false;
       document.getElementById('message-input').focus();
+      
+      // Start keep-alive ping every 30 seconds
+      ws.keepAliveInterval = setInterval(() => {
+        if (ws && ws.readyState === WebSocket.OPEN) {
+          console.log('💓 Sending keep-alive ping');
+          ws.send(JSON.stringify({ type: 'ping' }));
+        }
+      }, 30000);
     };
     
     ws.onmessage = (event) => {
-      console.log('Message received:', event.data);
+      console.log('📨 Message received:', event.data);
       try {
         const data = JSON.parse(event.data);
         handleMessage(data);
       } catch (e) {
-        console.error('Failed to parse message:', e);
+        console.error('❌ Failed to parse message:', e);
         addSystemMessage('⚠️ Received invalid message format', 'error');
       }
     };
     
     ws.onerror = (error) => {
       console.error('❌ WebSocket error:', error);
-      addSystemMessage('❌ Connection error: ' + error.message, 'error');
+      console.error('💥 Error details:', {
+        type: error.type,
+        message: error.message,
+        readyState: ws?.readyState
+      });
+      addSystemMessage('❌ Connection error: ' + (error.message || 'Unknown error'), 'error');
       document.getElementById('message-input').disabled = true;
     };
     
     ws.onclose = () => {
-      console.log('WebSocket closed');
+      console.log('🔌 WebSocket closed. Ready state:', ws.readyState);
+      if (ws.keepAliveInterval) {
+        clearInterval(ws.keepAliveInterval);
+      }
       addSystemMessage('⏹️ Disconnected from peer', 'error');
       document.getElementById('message-input').disabled = true;
     };
