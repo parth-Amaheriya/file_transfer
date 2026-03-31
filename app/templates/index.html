@@ -85,11 +85,13 @@
     return response.json();
   };
 
-  const goToChat = (pairingId, deviceId, peerDevice) => {
+  const goToChat = (pairingId, deviceId, currentDeviceInfo, peerDevice) => {
     // Store pairing info in sessionStorage
+    console.log('Storing chat data:', { pairingId, deviceId, currentDeviceInfo, peerDevice });
     sessionStorage.setItem('pairing_id', pairingId);
     sessionStorage.setItem('device_id', deviceId);
     sessionStorage.setItem('peer_device', JSON.stringify(peerDevice));
+    sessionStorage.setItem('current_device', JSON.stringify(currentDeviceInfo));
     // Navigate to chat
     window.location.href = '/chat';
   };
@@ -114,7 +116,7 @@
             const chatBtn = document.createElement('button');
             chatBtn.textContent = `💬 Go to Chat`;
             chatBtn.className = 'ghost';
-            chatBtn.onclick = () => goToChat(data.id, deviceId, data.peer);
+            chatBtn.onclick = () => goToChat(data.id, deviceId, MyDevice, data.peer);
             chatBtn.style.marginLeft = '10px';
             
             generateStatus.innerHTML = `✓ Connected! Device B (${peer}) has joined. `;
@@ -168,11 +170,12 @@
     try {
       const deviceId = value(joinForm, "device_identifier");
       const deviceLabel = value(joinForm, "device_label");
+      const currentDevice = {
+        identifier: deviceId,
+        label: deviceLabel || null,
+      };
       const payload = {
-        device: {
-          identifier: deviceId,
-          label: deviceLabel || null,
-        },
+        device: currentDevice,
       };
       const code = value(joinForm, "pairing_code");
       const data = await postJson(`/api/pairing/join/${encodeURIComponent(code)}`, payload);
@@ -181,7 +184,7 @@
       const chatBtn = document.createElement('button');
       chatBtn.textContent = `💬 Go to Chat`;
       chatBtn.className = 'ghost';
-      chatBtn.onclick = () => goToChat(data.id, deviceId, data.initiator);
+      chatBtn.onclick = () => goToChat(data.id, deviceId, currentDevice, data.initiator);
       chatBtn.style.marginLeft = '10px';
       
       joinStatus.innerHTML = `✓ Successfully connected to ${partner}! `;
