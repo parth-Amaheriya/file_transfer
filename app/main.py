@@ -376,6 +376,7 @@ async def upload_to_peer(pairing_id: str, device_id: str = Form(...), file: Uplo
                     "type": "file_shared",
                     "filename": file.filename,
                     "size": size,
+                    "mime_type": file.content_type,
                     "timestamp": int(time.time() * 1000)
                 }
                 
