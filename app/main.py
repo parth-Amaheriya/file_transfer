@@ -5,16 +5,20 @@ import errno
 import logging
 import secrets
 import tempfile
+import time
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Optional
 from uuid import uuid4
+from io import BytesIO
+import base64
 
 import aiofiles
-from fastapi import FastAPI, File, HTTPException, Request, UploadFile, WebSocket, WebSocketDisconnect
+import qrcode
+from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile, WebSocket, WebSocketDisconnect
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, RedirectResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
-from fastapi.templating import Jinja2Templates
 
 from .config import get_settings
 from .schemas import (
@@ -29,8 +33,16 @@ from .schemas import (
 settings = get_settings()
 app = FastAPI(title="P2P Transfer", version="1.0.0")
 
+# Add CORS middleware
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["http://localhost:5173"],  # React dev server
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
 APP_DIR = Path(__file__).resolve().parent
-templates = Jinja2Templates(directory=str(APP_DIR / "templates"))
 static_dir = APP_DIR / "static"
 static_dir.mkdir(parents=True, exist_ok=True)
 app.mount("/static", StaticFiles(directory=static_dir), name="static")
@@ -39,8 +51,10 @@ logger = logging.getLogger("p2p_transfer")
 
 
 def _prepare_upload_root(raw_path: Path) -> Path:
+    logger.info(f"Attempting to use uploads path: {raw_path}")
     try:
         raw_path.mkdir(parents=True, exist_ok=True)
+        logger.info(f"Using uploads path: {raw_path}")
         return raw_path
     except OSError as exc:
         if exc.errno != errno.EROFS:
@@ -56,6 +70,7 @@ def _prepare_upload_root(raw_path: Path) -> Path:
 
 
 uploads_root = _prepare_upload_root(Path(settings.uploads_path))
+logger.info(f"Final uploads root: {uploads_root}")
 
 PAIRING_CODE_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
 PAIRING_CODE_LENGTH = 6
@@ -174,12 +189,14 @@ class PairingManager:
         if pairing:
             self.codes.pop(pairing.code, None)
 
-    async def cleanup_expired(self) -> None:
+    async def cleanup_expired(self) -> int:
         """Periodic cleanup of expired pairings"""
         async with self.lock:
             expired_ids = [pid for pid, p in self.pairings.items() if p.is_expired()]
             for pid in expired_ids:
+                logger.info(f"Cleaning up expired pairing {pid}")
                 self.pause_pairing(pid)
+            return len(expired_ids)
 
 
 class ConnectionManager:
@@ -291,17 +308,18 @@ connection_manager = ConnectionManager()
 async def initiate_pairing(body: PairingCodeCreate) -> dict[str, Any]:
     """Device A initiates a pairing and gets a code"""
     pairing = await pairing_manager.create_pairing(body.device)
-    logger.info(f"Pairing initiated: {pairing.code} by {body.device.identifier}")
+    logger.info(f"Pairing initiated: {pairing.code} by {body.device.identifier}, ID: {pairing.id}")
     return pairing.to_dict()
 
 
 @app.post("/api/pairing/join/{code}", response_model=PairingCodeOut)
 async def join_pairing(code: str, body: PairingCodeJoin) -> dict[str, Any]:
     """Device B joins a pairing using the code"""
+    logger.info(f"Join request for code: {code}")
     pairing = await pairing_manager.join_pairing(code, body.device)
     logger.info(
         f"Pairing joined: {code} by {body.device.identifier}. "
-        f"Connected: {pairing.initiator.identifier} <-> {body.device.identifier}"
+        f"Pairing ID: {pairing.id}, Status: {pairing.status}"
     )
     return pairing.to_dict()
 
@@ -314,40 +332,128 @@ async def get_pairing_status(code: str) -> dict[str, Any]:
 
 
 @app.post("/api/pairing/{pairing_id}/files")
-async def upload_to_peer(pairing_id: str, file: UploadFile = File(...)) -> dict[str, Any]:
-    """Upload file to send to peer (stores in temp location)"""
-    pairing = await pairing_manager.get_pairing_by_id(pairing_id)
+async def upload_to_peer(pairing_id: str, device_id: str = Form(...), files: list[UploadFile] = File(...)) -> dict[str, Any]:
+    """Upload multiple files to send to peer (stores in temp location)"""
+    try:
+        pairing = await pairing_manager.get_pairing_by_id(pairing_id)
+        logger.info(f"Found pairing {pairing_id}, status: {pairing.status}")
+    except HTTPException as e:
+        logger.warning(f"Pairing lookup failed for {pairing_id}: {e.detail}")
+        raise HTTPException(status_code=404, detail=f"Pairing not found: {e.detail}")
+    
     if pairing.status != "connected":
-        raise HTTPException(status_code=409, detail="Pairing not connected")
+        logger.warning(f"Pairing {pairing_id} status is {pairing.status}, not connected")
+        raise HTTPException(status_code=409, detail=f"Pairing not connected (status: {pairing.status})")
 
-    # Store file in pairing-specific directory
+    # Store files in pairing-specific directory
     pairing_dir = uploads_root / pairing_id
     pairing_dir.mkdir(parents=True, exist_ok=True)
-    target_path = pairing_dir / file.filename
-
-    size = 0
-    async with aiofiles.open(target_path, "wb") as out:
-        while chunk := await file.read(1024 * 1024):
-            size += len(chunk)
-            await out.write(chunk)
-
-    logger.info(f"File uploaded for pairing {pairing_id}: {file.filename} ({size} bytes)")
-    return {"status": "uploaded", "filename": file.filename, "size": size}
+    
+    uploaded_files = []
+    failed_files = []
+    
+    for file in files:
+        try:
+            target_path = pairing_dir / file.filename
+            size = 0
+            
+            async with aiofiles.open(target_path, "wb") as out:
+                while chunk := await file.read(1024 * 1024):
+                    size += len(chunk)
+                    await out.write(chunk)
+            
+            uploaded_files.append({
+                "filename": file.filename,
+                "size": size,
+                "status": "uploaded"
+            })
+            logger.info(f"File uploaded for pairing {pairing_id}: {file.filename} ({size} bytes)")
+            
+            # Notify peer via WebSocket that file is available
+            if device_id:
+                notification_payload = {
+                    "type": "file_shared",
+                    "filename": file.filename,
+                    "size": size,
+                    "timestamp": int(time.time() * 1000)
+                }
+                
+                # Send notification only to the peer, not back to sender
+                success = await connection_manager.send_to_peer(pairing_id, device_id, notification_payload)
+                if success:
+                    logger.info(f"Sent file_shared notification for {file.filename} to peer in pairing {pairing_id}")
+                else:
+                    logger.warning(f"Failed to send file_shared notification for {file.filename} - peer not connected")
+            else:
+                logger.warning(f"No device_id provided for file upload notification: {file.filename}")
+            
+        except Exception as e:
+            logger.error(f"Failed to write file {file.filename}: {e}")
+            failed_files.append({
+                "filename": file.filename,
+                "error": str(e)
+            })
+    
+    return {
+        "status": "completed",
+        "uploaded": uploaded_files,
+        "failed": failed_files,
+        "total_uploaded": len(uploaded_files),
+        "total_failed": len(failed_files)
+    }
 
 
 @app.get("/api/pairing/{pairing_id}/files/{filename}")
 async def download_from_peer(pairing_id: str, filename: str):
     """Download file from peer"""
-    pairing = await pairing_manager.get_pairing_by_id(pairing_id)
+    try:
+        pairing = await pairing_manager.get_pairing_by_id(pairing_id)
+        logger.info(f"Found pairing {pairing_id} for download, status: {pairing.status}")
+    except HTTPException as e:
+        logger.warning(f"Pairing lookup failed for download {pairing_id}: {e.detail}")
+        raise HTTPException(status_code=404, detail=f"Pairing not found: {e.detail}")
+    
     if pairing.status != "connected":
-        raise HTTPException(status_code=409, detail="Pairing not connected")
+        logger.warning(f"Pairing {pairing_id} not connected for download (status: {pairing.status})")
+        raise HTTPException(status_code=409, detail=f"Pairing not connected (status: {pairing.status})")
 
     path = uploads_root / pairing_id / filename
     if not path.exists():
-        raise HTTPException(status_code=404, detail="File not found")
+        logger.warning(f"File not found: {path}")
+        raise HTTPException(status_code=404, detail=f"File not found: {filename}")
 
     logger.info(f"File downloaded from pairing {pairing_id}: {filename}")
     return FileResponse(path)
+
+
+@app.get("/api/pairing/{code}/qrcode")
+async def generate_qrcode(code: str) -> dict[str, Any]:
+    """Generate QR code for pairing code"""
+    # Verify pairing code exists
+    pairing = await pairing_manager.get_pairing(code)
+    
+    # Generate QR code
+    qr = qrcode.QRCode(
+        version=1,
+        error_correction=qrcode.constants.ERROR_CORRECT_L,
+        box_size=10,
+        border=4,
+    )
+    
+    # Use direct pairing code for scanning
+    qr.add_data(code)
+    qr.make(fit=True)
+    img = qr.make_image(fill_color="black", back_color="white")
+    
+    # Convert to base64 data URL
+    buffer = BytesIO()
+    img.save(buffer, format="PNG")
+    buffer.seek(0)
+    img_base64 = base64.b64encode(buffer.getvalue()).decode()
+    data_url = f"data:image/png;base64,{img_base64}"
+    
+    logger.info(f"QR code generated for pairing code: {code}")
+    return {"code": code, "qrcode": data_url}
 
 
 # ============================================================================
@@ -358,14 +464,20 @@ async def download_from_peer(pairing_id: str, filename: str):
 @app.websocket("/ws/pairing/{pairing_id}/{device_id}")
 async def websocket_peer_connection(pairing_id: str, device_id: str, ws: WebSocket):
     """WebSocket for P2P communication between paired devices"""
+    logger.info(f"WebSocket connection attempt: pairing_id={pairing_id}, device_id={device_id}")
+    
     try:
         pairing = await pairing_manager.get_pairing_by_id(pairing_id)
-        if pairing.status != "connected":
-            await ws.close(code=4000, reason="Pairing not connected")
+        logger.info(f"Found pairing {pairing_id}, status: {pairing.status}, code: {pairing.code}")
+        
+        # Allow connections for both pending (host) and connected (peer) states
+        if pairing.status not in ["pending", "connected"]:
+            logger.warning(f"Rejecting WebSocket for pairing {pairing_id} with status {pairing.status}")
+            await ws.close(code=4000, reason=f"Pairing not in valid state: {pairing.status}")
             return
 
         await connection_manager.connect(pairing_id, device_id, ws)
-        logger.info(f"Device {device_id} connected to pairing {pairing_id}")
+        logger.info(f"Device {device_id} connected to pairing {pairing_id} (status: {pairing.status})")
 
         while True:
             data = await ws.receive_json()
@@ -377,7 +489,7 @@ async def websocket_peer_connection(pairing_id: str, device_id: str, ws: WebSock
                 continue
 
             # Relay messages to peer
-            if msg_type in ["text", "file_init", "file_chunk", "file_end", "file_shared"]:
+            if msg_type in ["text", "file_init", "file_chunk", "file_end", "file_shared", "snippet"]:
                 success = await connection_manager.send_to_peer(
                     pairing_id, device_id, {"sender": device_id, **data}
                 )
@@ -386,29 +498,20 @@ async def websocket_peer_connection(pairing_id: str, device_id: str, ws: WebSock
             else:
                 await ws.send_json({"type": "error", "message": f"Unknown message type: {msg_type}"})
 
+    except HTTPException as e:
+        logger.error(f"WebSocket pairing lookup failed for {pairing_id}/{device_id}: {e.detail}")
+        await ws.close(code=4000, reason=f"Pairing error: {e.detail}")
     except WebSocketDisconnect:
         await connection_manager.disconnect(pairing_id, device_id)
         logger.info(f"Device {device_id} disconnected from pairing {pairing_id}")
     except Exception as e:
-        logger.error(f"WebSocket error: {e}")
+        logger.error(f"WebSocket error for {pairing_id}/{device_id}: {e}")
         await connection_manager.disconnect(pairing_id, device_id)
 
 
 # ============================================================================
 # UI Endpoints
 # ============================================================================
-
-
-@app.get("/")
-async def dashboard(request: Request):
-    """Dashboard to create or join pairing"""
-    return templates.TemplateResponse("index.html", {"request": request})
-
-
-@app.get("/chat")
-async def chat_page(request: Request):
-    """Chat interface for paired devices"""
-    return templates.TemplateResponse("pairing_chat.html", {"request": request})
 
 
 # ============================================================================
@@ -422,7 +525,10 @@ async def startup_cleanup():
     async def cleanup_task():
         while True:
             await asyncio.sleep(60)  # Run every minute
-            await pairing_manager.cleanup_expired()
+            logger.info("Running pairing cleanup...")
+            expired_count = await pairing_manager.cleanup_expired()
+            if expired_count > 0:
+                logger.info(f"Cleaned up {expired_count} expired pairings")
 
     asyncio.create_task(cleanup_task())
 
