@@ -332,8 +332,9 @@ async def get_pairing_status(code: str) -> dict[str, Any]:
 
 
 @app.post("/api/pairing/{pairing_id}/files")
-async def upload_to_peer(pairing_id: str, device_id: str = Form(...), files: list[UploadFile] = File(...)) -> dict[str, Any]:
-    """Upload multiple files to send to peer (stores in temp location)"""
+async def upload_to_peer(pairing_id: str, device_id: str = Form(...), file: UploadFile = File(...)) -> dict[str, Any]:
+    """Upload a file to send to peer (stores in temp location)"""
+    files = [file]  # Treat as list for consistent processing
     try:
         pairing = await pairing_manager.get_pairing_by_id(pairing_id)
         logger.info(f"Found pairing {pairing_id}, status: {pairing.status}")
