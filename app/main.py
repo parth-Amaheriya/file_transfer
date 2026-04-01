@@ -33,26 +33,10 @@ from .schemas import (
 settings = get_settings()
 app = FastAPI(title="P2P Transfer", version="1.0.0")
 
-# Configure for large file uploads
-from fastapi.middleware.base import BaseHTTPMiddleware
-from starlette.requests import Request
-from starlette.responses import Response
-
-class LargeFileMiddleware(BaseHTTPMiddleware):
-    async def dispatch(self, request: Request, call_next):
-        # Remove any size limits for file uploads
-        if request.method == "POST" and "/files" in request.url.path:
-            # Allow unlimited body size for file uploads
-            pass
-        response = await call_next(request)
-        return response
-
-app.add_middleware(LargeFileMiddleware)
-
 # Add CORS middleware
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:5173", "https://file-transfer-frontend-nine.vercel.app"],
+    allow_origins=["http://localhost:5173", "https://nexdroppair.vercel.app"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
