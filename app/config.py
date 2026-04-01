@@ -21,6 +21,6 @@ def get_settings() -> Settings:
     settings = Settings()
     # Resolve relative paths
     if settings.uploads_path.startswith("../") or settings.uploads_path.startswith("..\\"):
-        settings.uploads_path = str((BASE_DIR / settings.uploads_path).resolve())
+        settings.uploads_path = str((BASE_DIR / settings.uploads_path).resolve())   
     print(f"Settings loaded: uploads_path = {settings.uploads_path}")
     return settings

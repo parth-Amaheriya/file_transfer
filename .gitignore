@@ -3,6 +3,8 @@ __pycache__/
 *.py[cod]
 *$py.class
 
+uploads/
+
 # Virtual environments
 .venv/
 venv/
