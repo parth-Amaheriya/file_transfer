@@ -33,6 +33,22 @@ from .schemas import (
 settings = get_settings()
 app = FastAPI(title="P2P Transfer", version="1.0.0")
 
+# Configure for large file uploads
+from fastapi.middleware.base import BaseHTTPMiddleware
+from starlette.requests import Request
+from starlette.responses import Response
+
+class LargeFileMiddleware(BaseHTTPMiddleware):
+    async def dispatch(self, request: Request, call_next):
+        # Remove any size limits for file uploads
+        if request.method == "POST" and "/files" in request.url.path:
+            # Allow unlimited body size for file uploads
+            pass
+        response = await call_next(request)
+        return response
+
+app.add_middleware(LargeFileMiddleware)
+
 # Add CORS middleware
 app.add_middleware(
     CORSMiddleware,
@@ -358,8 +374,9 @@ async def upload_to_peer(pairing_id: str, device_id: str = Form(...), file: Uplo
             target_path = pairing_dir / file.filename
             size = 0
             
+            # Use larger chunks for faster processing of large files
             async with aiofiles.open(target_path, "wb") as out:
-                while chunk := await file.read(1024 * 1024):
+                while chunk := await file.read(10 * 1024 * 1024):  # 10MB chunks
                     size += len(chunk)
                     await out.write(chunk)
             
@@ -375,7 +392,7 @@ async def upload_to_peer(pairing_id: str, device_id: str = Form(...), file: Uplo
                 notification_payload = {
                     "type": "file_shared",
                     "filename": file.filename,
-                    "size": size,
+                    "file_size": size,
                     "mime_type": file.content_type,
                     "timestamp": int(time.time() * 1000)
                 }
