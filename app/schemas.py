@@ -43,3 +43,8 @@ class TextMessage(BaseModel):
     type: Literal["text"]
     content: str
     timestamp: datetime = Field(default_factory=datetime.utcnow)
+
+
+class SignalingMessage(BaseModel):
+    type: Literal["offer", "answer", "ice_candidate"]
+    data: dict[str, Any]  # SDP or ICE candidate data
