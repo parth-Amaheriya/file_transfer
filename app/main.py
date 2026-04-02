@@ -200,11 +200,71 @@ class PairingManager:
 
 
 class ConnectionManager:
-    """Manage WebRTC signaling between paired devices"""
+    """Manage WebRTC signaling and WebSocket connections between paired devices"""
 
     def __init__(self):
         self.signaling_messages: dict[str, list[dict]] = {}  # pairing_id -> list of signaling messages
+        self.websocket_connections: dict[str, dict[str, WebSocket]] = {}  # pairing_id -> {device_id -> WebSocket}
         self.lock = asyncio.Lock()
+
+    async def connect(self, pairing_id: str, device_id: str, websocket: WebSocket) -> None:
+        """Register a WebSocket connection for a device in a pairing"""
+        await websocket.accept()
+        async with self.lock:
+            if pairing_id not in self.websocket_connections:
+                self.websocket_connections[pairing_id] = {}
+            self.websocket_connections[pairing_id][device_id] = websocket
+            logger.info(f"Connected device {device_id} to pairing {pairing_id}")
+
+    async def disconnect(self, pairing_id: str, device_id: str) -> None:
+        """Unregister a WebSocket connection for a device"""
+        async with self.lock:
+            if pairing_id in self.websocket_connections:
+                self.websocket_connections[pairing_id].pop(device_id, None)
+                # Clean up empty pairing entries
+                if not self.websocket_connections[pairing_id]:
+                    self.websocket_connections.pop(pairing_id, None)
+            logger.info(f"Disconnected device {device_id} from pairing {pairing_id}")
+
+    async def send_to_peer(self, pairing_id: str, sender_device_id: str, message: dict[str, Any]) -> bool:
+        """Send a message to the peer device"""
+        peer_device_id = None
+        websocket = None
+        
+        async with self.lock:
+            if pairing_id not in self.websocket_connections:
+                logger.warning(f"Pairing {pairing_id} has no active connections")
+                return False
+            
+            # Get all devices in this pairing except the sender
+            devices = self.websocket_connections[pairing_id]
+            for device_id in devices:
+                if device_id != sender_device_id:
+                    peer_device_id = device_id
+                    websocket = devices[peer_device_id]
+                    break
+            
+            if not peer_device_id:
+                logger.warning(f"No peer found for device {sender_device_id} in pairing {pairing_id}")
+                return False
+        
+        # Send outside of lock to avoid blocking
+        if websocket:
+            try:
+                await websocket.send_json(message)
+                logger.info(f"Sent message to device {peer_device_id} in pairing {pairing_id}")
+                return True
+            except Exception as e:
+                logger.error(f"Failed to send message to peer {peer_device_id}: {e}")
+                # Remove disconnected websocket
+                async with self.lock:
+                    if pairing_id in self.websocket_connections:
+                        self.websocket_connections[pairing_id].pop(peer_device_id, None)
+                        if not self.websocket_connections[pairing_id]:
+                            self.websocket_connections.pop(pairing_id, None)
+                return False
+        
+        return False
 
     async def store_signaling_message(self, pairing_id: str, message: dict[str, Any]) -> None:
         """Store a signaling message for the peer to retrieve"""
