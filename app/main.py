@@ -472,8 +472,8 @@ async def send_signaling_message(pairing_id: str, message: SignalingMessage) -> 
     """Send a WebRTC signaling message (offer, answer, or ICE candidate)"""
     try:
         pairing = await pairing_manager.get_pairing_by_id(pairing_id)
-        if pairing.status != "connected":
-            raise HTTPException(status_code=409, detail="Pairing not connected")
+        if pairing.status not in ["active", "connected"]:
+            raise HTTPException(status_code=409, detail="Pairing not active")
     except HTTPException:
         raise HTTPException(status_code=404, detail="Pairing not found")
 
@@ -487,8 +487,8 @@ async def get_signaling_messages(pairing_id: str) -> list[dict[str, Any]]:
     """Get pending WebRTC signaling messages"""
     try:
         pairing = await pairing_manager.get_pairing_by_id(pairing_id)
-        if pairing.status != "connected":
-            raise HTTPException(status_code=409, detail="Pairing not connected")
+        if pairing.status not in ["active", "connected"]:
+            raise HTTPException(status_code=409, detail="Pairing not active")
     except HTTPException:
         raise HTTPException(status_code=404, detail="Pairing not found")
 
