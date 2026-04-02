@@ -77,7 +77,7 @@ PAIRING_CODE_LENGTH = 6
 
 
 class PairingCode:
-    """In-memory pairing code with expiration"""
+    """In-memory pairing code with expiration - supports multiple devices"""
 
     def __init__(
         self,
@@ -89,7 +89,7 @@ class PairingCode:
         self.code = code
         self.status: str = "pending"
         self.initiator = initiator
-        self.peer: Optional[DeviceDescriptor] = None
+        self.peers: list[DeviceDescriptor] = []  # Changed from single peer to list
         self.created_at = datetime.utcnow()
         self.connected_at: Optional[datetime] = None
         self.expires_at = self.created_at + timedelta(seconds=ttl_seconds)
@@ -98,14 +98,22 @@ class PairingCode:
         return datetime.utcnow() > self.expires_at
 
     def connect_peer(self, peer: DeviceDescriptor) -> None:
-        if self.status != "pending":
-            raise ValueError("Pairing is not pending")
+        """Add a peer to the connection - supports multiple peers"""
         if self.is_expired():
             self.status = "expired"
             raise ValueError("Pairing code expired")
-        self.peer = peer
-        self.status = "connected"
-        self.connected_at = datetime.utcnow()
+        
+        # Add peer to the list if not already present
+        for existing_peer in self.peers:
+            if existing_peer.identifier == peer.identifier:
+                return  # Peer already connected
+        
+        self.peers.append(peer)
+        
+        # Update status only on first peer connection
+        if self.status == "pending":
+            self.status = "active"
+            self.connected_at = datetime.utcnow()
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -113,7 +121,8 @@ class PairingCode:
             "code": self.code,
             "status": self.status,
             "initiator": self.initiator.model_dump(),
-            "peer": self.peer.model_dump() if self.peer else None,
+            "peers": [peer.model_dump() for peer in self.peers],  # Return list of peers
+            "peer_count": len(self.peers),  # Also provide peer count
             "created_at": self.created_at,
             "connected_at": self.connected_at,
             "expires_at": self.expires_at,
@@ -155,9 +164,7 @@ class PairingManager:
                 self.pause_pairing(pairing.id)
                 raise HTTPException(status_code=410, detail="Pairing code expired")
 
-            if pairing.status != "pending":
-                raise HTTPException(status_code=409, detail="Pairing code already used")
-
+            # Allow multiple devices to join - removed the "already used" check
             pairing.connect_peer(device)
             return pairing
 
@@ -227,9 +234,9 @@ class ConnectionManager:
             logger.info(f"Disconnected device {device_id} from pairing {pairing_id}")
 
     async def send_to_peer(self, pairing_id: str, sender_device_id: str, message: dict[str, Any]) -> bool:
-        """Send a message to the peer device"""
-        peer_device_id = None
-        websocket = None
+        """Broadcast message to all peer devices (except sender)"""
+        peer_device_ids = []
+        websockets = []
         
         async with self.lock:
             if pairing_id not in self.websocket_connections:
@@ -238,33 +245,39 @@ class ConnectionManager:
             
             # Get all devices in this pairing except the sender
             devices = self.websocket_connections[pairing_id]
-            for device_id in devices:
+            for device_id, websocket in devices.items():
                 if device_id != sender_device_id:
-                    peer_device_id = device_id
-                    websocket = devices[peer_device_id]
-                    break
+                    peer_device_ids.append(device_id)
+                    websockets.append((device_id, websocket))
             
-            if not peer_device_id:
-                logger.warning(f"No peer found for device {sender_device_id} in pairing {pairing_id}")
+            if not peer_device_ids:
+                logger.warning(f"No peers found for device {sender_device_id} in pairing {pairing_id}")
                 return False
         
-        # Send outside of lock to avoid blocking
-        if websocket:
+        # Send to all peers outside of lock to avoid blocking
+        success_count = 0
+        failed_devices = []
+        
+        for device_id, websocket in websockets:
             try:
                 await websocket.send_json(message)
-                logger.info(f"Sent message to device {peer_device_id} in pairing {pairing_id}")
-                return True
+                logger.info(f"Sent message to device {device_id} in pairing {pairing_id}")
+                success_count += 1
             except Exception as e:
-                logger.error(f"Failed to send message to peer {peer_device_id}: {e}")
-                # Remove disconnected websocket
-                async with self.lock:
-                    if pairing_id in self.websocket_connections:
-                        self.websocket_connections[pairing_id].pop(peer_device_id, None)
-                        if not self.websocket_connections[pairing_id]:
-                            self.websocket_connections.pop(pairing_id, None)
-                return False
+                logger.error(f"Failed to send message to peer {device_id}: {e}")
+                failed_devices.append(device_id)
         
-        return False
+        # Remove failed websockets
+        if failed_devices:
+            async with self.lock:
+                if pairing_id in self.websocket_connections:
+                    for device_id in failed_devices:
+                        self.websocket_connections[pairing_id].pop(device_id, None)
+                    # Clean up empty pairing entries
+                    if not self.websocket_connections[pairing_id]:
+                        self.websocket_connections.pop(pairing_id, None)
+        
+        return success_count > 0
 
     async def store_signaling_message(self, pairing_id: str, message: dict[str, Any]) -> None:
         """Store a signaling message for the peer to retrieve"""
@@ -497,8 +510,8 @@ async def websocket_peer_connection(pairing_id: str, device_id: str, ws: WebSock
         pairing = await pairing_manager.get_pairing_by_id(pairing_id)
         logger.info(f"Found pairing {pairing_id}, status: {pairing.status}, code: {pairing.code}")
         
-        # Allow connections for both pending (host) and connected (peer) states
-        if pairing.status not in ["pending", "connected"]:
+        # Allow connections for both pending (initiator) and active (other devices) states
+        if pairing.status not in ["pending", "active"]:
             logger.warning(f"Rejecting WebSocket for pairing {pairing_id} with status {pairing.status}")
             await ws.close(code=4000, reason=f"Pairing not in valid state: {pairing.status}")
             return
