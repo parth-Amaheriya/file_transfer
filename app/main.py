@@ -510,8 +510,8 @@ async def websocket_peer_connection(pairing_id: str, device_id: str, ws: WebSock
         pairing = await pairing_manager.get_pairing_by_id(pairing_id)
         logger.info(f"Found pairing {pairing_id}, status: {pairing.status}, code: {pairing.code}")
         
-        # Allow connections for both pending (initiator) and active (other devices) states
-        if pairing.status not in ["pending", "active"]:
+        # Allow connections for pending, active, and connected states (for multi-device scenarios)
+        if pairing.status not in ["pending", "active", "connected"]:
             logger.warning(f"Rejecting WebSocket for pairing {pairing_id} with status {pairing.status}")
             await ws.close(code=4000, reason=f"Pairing not in valid state: {pairing.status}")
             return
