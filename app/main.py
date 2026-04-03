@@ -344,9 +344,9 @@ async def upload_to_peer(pairing_id: str, device_id: str = Form(...), file: Uplo
         logger.warning(f"Pairing lookup failed for {pairing_id}: {e.detail}")
         raise HTTPException(status_code=404, detail=f"Pairing not found: {e.detail}")
     
-    if pairing.status != "connected":
-        logger.warning(f"Pairing {pairing_id} status is {pairing.status}, not connected")
-        raise HTTPException(status_code=409, detail=f"Pairing not connected (status: {pairing.status})")
+    if pairing.status not in ["active", "connected"]:
+        logger.warning(f"Pairing {pairing_id} status is {pairing.status}, not active or connected")
+        raise HTTPException(status_code=409, detail=f"Pairing not active (status: {pairing.status})")
 
     # Store files in pairing-specific directory
     pairing_dir = uploads_root / pairing_id
