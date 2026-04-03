@@ -115,6 +115,18 @@ class PairingCode:
             self.status = "connected"
             self.connected_at = datetime.utcnow()
 
+    def remove_peer(self, peer_identifier: str) -> bool:
+        """Remove a peer from the pairing."""
+        original_count = len(self.peers)
+        self.peers = [peer for peer in self.peers if peer.identifier != peer_identifier]
+
+        if self.peers:
+            self.status = "connected"
+        elif self.status != "expired":
+            self.status = "pending"
+
+        return len(self.peers) != original_count
+
     def to_dict(self) -> dict[str, Any]:
         return {
             "id": self.id,
@@ -189,6 +201,18 @@ class PairingManager:
             self.pause_pairing(pairing_id)
             raise HTTPException(status_code=410, detail="Pairing expired")
         return pairing
+
+    async def remove_peer(self, pairing_id: str, peer_identifier: str) -> PairingCode:
+        async with self.lock:
+            pairing = self.pairings.get(pairing_id)
+            if not pairing:
+                raise HTTPException(status_code=404, detail="Pairing not found")
+
+            removed = pairing.remove_peer(peer_identifier)
+            if not removed:
+                return pairing
+
+            return pairing
 
     def pause_pairing(self, pairing_id: str) -> None:
         """Remove expired pairing"""
@@ -287,14 +311,29 @@ class ConnectionManager:
             self.signaling_messages[pairing_id].append(message)
             logger.info(f"Stored signaling message for pairing {pairing_id}: {message['type']}")
 
-    async def get_signaling_messages(self, pairing_id: str) -> list[dict[str, Any]]:
-        """Get all signaling messages for a pairing"""
+    async def get_signaling_messages(
+        self,
+        pairing_id: str,
+        device_id: str,
+        sender_device_id: str | None = None,
+    ) -> list[dict[str, Any]]:
+        """Get signaling messages targeted to a specific device in a pairing."""
         async with self.lock:
             messages = self.signaling_messages.get(pairing_id, [])
-            # Clear messages after retrieval
-            self.signaling_messages[pairing_id] = []
-            logger.info(f"Retrieved {len(messages)} signaling messages for pairing {pairing_id}")
-            return messages
+            matched_messages = [
+                message for message in messages
+                if (message.get("target_device_id") == device_id or message.get("target_device_id") == "*")
+                and (sender_device_id is None or message.get("sender_device_id") == sender_device_id)
+            ]
+            # Keep only messages that were not consumed by this device yet.
+            self.signaling_messages[pairing_id] = [
+                message for message in messages
+                if message not in matched_messages
+            ]
+            logger.info(
+                f"Retrieved {len(matched_messages)} signaling messages for pairing {pairing_id} and device {device_id}"
+            )
+            return matched_messages
 
 
 pairing_manager = PairingManager()
@@ -323,6 +362,14 @@ async def join_pairing(code: str, body: PairingCodeJoin) -> dict[str, Any]:
         f"Pairing joined: {code} by {body.device.identifier}. "
         f"Pairing ID: {pairing.id}, Status: {pairing.status}"
     )
+    return pairing.to_dict()
+
+
+@app.post("/api/pairing/{pairing_id}/leave/{device_id}", response_model=PairingCodeOut)
+async def leave_pairing(pairing_id: str, device_id: str) -> dict[str, Any]:
+    """Remove a device from a pairing when it disconnects."""
+    pairing = await pairing_manager.remove_peer(pairing_id, device_id)
+    logger.info(f"Device {device_id} left pairing {pairing_id}")
     return pairing.to_dict()
 
 
@@ -483,7 +530,7 @@ async def send_signaling_message(pairing_id: str, message: SignalingMessage) -> 
 
 
 @app.get("/api/pairing/{pairing_id}/signaling")
-async def get_signaling_messages(pairing_id: str) -> list[dict[str, Any]]:
+async def get_signaling_messages(pairing_id: str, device_id: str, sender_device_id: str | None = None) -> list[dict[str, Any]]:
     """Get pending WebRTC signaling messages"""
     try:
         pairing = await pairing_manager.get_pairing_by_id(pairing_id)
@@ -492,7 +539,7 @@ async def get_signaling_messages(pairing_id: str) -> list[dict[str, Any]]:
     except HTTPException:
         raise HTTPException(status_code=404, detail="Pairing not found")
 
-    messages = await connection_manager.get_signaling_messages(pairing_id)
+    messages = await connection_manager.get_signaling_messages(pairing_id, device_id, sender_device_id)
     return messages
 
 
