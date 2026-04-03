@@ -112,7 +112,7 @@ class PairingCode:
         
         # Update status only on first peer connection
         if self.status == "pending":
-            self.status = "active"
+            self.status = "connected"
             self.connected_at = datetime.utcnow()
 
     def to_dict(self) -> dict[str, Any]:

@@ -24,7 +24,8 @@ class PairingCodeOut(BaseModel):
     code: str
     status: Literal["pending", "connected", "expired"] = "pending"
     initiator: DeviceDescriptor
-    peer: Optional[DeviceDescriptor] = None
+    peers: list[DeviceDescriptor] = Field(default_factory=list)
+    peer_count: int = 0
     created_at: datetime
     connected_at: Optional[datetime] = None
     expires_at: datetime
