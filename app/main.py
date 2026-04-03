@@ -13,11 +13,9 @@ from uuid import uuid4
 from io import BytesIO
 import base64
 
-import aiofiles
 import qrcode
-from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, RedirectResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
 from .config import get_settings
@@ -378,104 +376,6 @@ async def get_pairing_status(code: str) -> dict[str, Any]:
     """Check pairing status"""
     pairing = await pairing_manager.get_pairing(code)
     return pairing.to_dict()
-
-
-@app.post("/api/pairing/{pairing_id}/files")
-async def upload_to_peer(pairing_id: str, device_id: str = Form(...), file: UploadFile = File(...)) -> dict[str, Any]:
-    """Upload a file to send to peer (stores in temp location)"""
-    files = [file]  # Treat as list for consistent processing
-    try:
-        pairing = await pairing_manager.get_pairing_by_id(pairing_id)
-        logger.info(f"Found pairing {pairing_id}, status: {pairing.status}")
-    except HTTPException as e:
-        logger.warning(f"Pairing lookup failed for {pairing_id}: {e.detail}")
-        raise HTTPException(status_code=404, detail=f"Pairing not found: {e.detail}")
-    
-    if pairing.status not in ["active", "connected"]:
-        logger.warning(f"Pairing {pairing_id} status is {pairing.status}, not active or connected")
-        raise HTTPException(status_code=409, detail=f"Pairing not active (status: {pairing.status})")
-
-    # Store files in pairing-specific directory
-    pairing_dir = uploads_root / pairing_id
-    pairing_dir.mkdir(parents=True, exist_ok=True)
-    
-    uploaded_files = []
-    failed_files = []
-    
-    for file in files:
-        try:
-            target_path = pairing_dir / file.filename
-            size = 0
-            
-            # Use larger chunks for faster processing of large files
-            async with aiofiles.open(target_path, "wb") as out:
-                while chunk := await file.read(10 * 1024 * 1024):  # 10MB chunks
-                    size += len(chunk)
-                    await out.write(chunk)
-            
-            uploaded_files.append({
-                "filename": file.filename,
-                "size": size,
-                "status": "uploaded"
-            })
-            logger.info(f"File uploaded for pairing {pairing_id}: {file.filename} ({size} bytes)")
-            
-            # Notify peer via WebSocket that file is available
-            if device_id:
-                notification_payload = {
-                    "type": "file_shared",
-                    "filename": file.filename,
-                    "file_size": size,
-                    "mime_type": file.content_type,
-                    "timestamp": int(time.time() * 1000)
-                }
-                
-                # Send notification only to the peer, not back to sender
-                success = await connection_manager.send_to_peer(pairing_id, device_id, notification_payload)
-                if success:
-                    logger.info(f"Sent file_shared notification for {file.filename} to peer in pairing {pairing_id}")
-                else:
-                    logger.warning(f"Failed to send file_shared notification for {file.filename} - peer not connected")
-            else:
-                logger.warning(f"No device_id provided for file upload notification: {file.filename}")
-            
-        except Exception as e:
-            logger.error(f"Failed to write file {file.filename}: {e}")
-            failed_files.append({
-                "filename": file.filename,
-                "error": str(e)
-            })
-    
-    return {
-        "status": "completed",
-        "uploaded": uploaded_files,
-        "failed": failed_files,
-        "total_uploaded": len(uploaded_files),
-        "total_failed": len(failed_files)
-    }
-
-
-@app.get("/api/pairing/{pairing_id}/files/{filename}")
-async def download_from_peer(pairing_id: str, filename: str):
-    """Download file from peer"""
-    try:
-        pairing = await pairing_manager.get_pairing_by_id(pairing_id)
-        logger.info(f"Found pairing {pairing_id} for download, status: {pairing.status}")
-    except HTTPException as e:
-        logger.warning(f"Pairing lookup failed for download {pairing_id}: {e.detail}")
-        raise HTTPException(status_code=404, detail=f"Pairing not found: {e.detail}")
-    
-    if pairing.status != "connected":
-        logger.warning(f"Pairing {pairing_id} not connected for download (status: {pairing.status})")
-        raise HTTPException(status_code=409, detail=f"Pairing not connected (status: {pairing.status})")
-
-    path = uploads_root / pairing_id / filename
-    if not path.exists():
-        logger.warning(f"File not found: {path}")
-        raise HTTPException(status_code=404, detail=f"File not found: {filename}")
-
-    logger.info(f"File downloaded from pairing {pairing_id}: {filename}")
-    return FileResponse(path)
 
 
 @app.get("/api/pairing/{code}/qrcode")

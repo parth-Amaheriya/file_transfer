@@ -9,7 +9,7 @@ BASE_DIR = Path(__file__).resolve().parents[2]  # Project root
 class Settings(BaseSettings):
     uploads_path: str = "../uploads"  # Relative to backend directory
     pairing_code_ttl: int = 3600  # 1 hour in seconds
-    max_connections: int = 100
+    max_connections: int = 50
 
     model_config = {
         "env_file": BASE_DIR / ".env",
