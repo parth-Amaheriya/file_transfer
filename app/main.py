@@ -12,9 +12,11 @@ from typing import Any, Optional
 from uuid import uuid4
 from io import BytesIO
 import base64
+import json
 
 import qrcode
 from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
+from fastapi.responses import StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 
@@ -146,6 +148,7 @@ class PairingManager:
         self.pairings: dict[str, PairingCode] = {}
         self.codes: dict[str, PairingCode] = {}  # code -> PairingCode mapping
         self.lock = asyncio.Lock()
+        self.sse_queues: dict[str, asyncio.Queue] = {}  # pairing_id -> queue for SSE updates
 
     async def create_pairing(self, device: DeviceDescriptor) -> PairingCode:
         async with self.lock:
@@ -176,6 +179,8 @@ class PairingManager:
 
             # Allow multiple devices to join - removed the "already used" check
             pairing.connect_peer(device)
+            # Broadcast the update
+            await self.broadcast_pairing_update(pairing)
             return pairing
 
     async def get_pairing(self, code: str) -> PairingCode:
@@ -210,6 +215,8 @@ class PairingManager:
             if not removed:
                 return pairing
 
+            # Broadcast the update
+            await self.broadcast_pairing_update(pairing)
             return pairing
 
     def pause_pairing(self, pairing_id: str) -> None:
@@ -226,6 +233,41 @@ class PairingManager:
                 logger.info(f"Cleaning up expired pairing {pid}")
                 self.pause_pairing(pid)
             return len(expired_ids)
+
+    async def subscribe_to_pairing_updates(self, pairing_id: str) -> asyncio.Queue:
+        """Subscribe to SSE updates for a pairing"""
+        async with self.lock:
+            if pairing_id not in self.sse_queues:
+                self.sse_queues[pairing_id] = asyncio.Queue()
+            return self.sse_queues[pairing_id]
+
+    async def broadcast_pairing_update(self, pairing: PairingCode) -> None:
+        """Broadcast pairing status update to all SSE subscribers"""
+        if pairing.id in self.sse_queues:
+            update_data = {
+                "type": "pairing_update",
+                "data": pairing.to_dict()
+            }
+            try:
+                # Don't wait for subscribers to consume, just put in queue
+                await asyncio.wait_for(
+                    self.sse_queues[pairing.id].put(json.dumps(update_data)),
+                    timeout=0.1
+                )
+            except asyncio.TimeoutError:
+                # Queue is full, skip this update
+                pass
+
+    async def unsubscribe_from_pairing_updates(self, pairing_id: str, queue: asyncio.Queue) -> None:
+        """Unsubscribe from SSE updates for a pairing"""
+        async with self.lock:
+            if pairing_id in self.sse_queues and self.sse_queues[pairing_id] is queue:
+                # Clear the queue but don't delete it in case others are using it
+                try:
+                    while not queue.empty():
+                        queue.get_nowait()
+                except asyncio.QueueEmpty:
+                    pass
 
 
 class ConnectionManager:
@@ -376,6 +418,46 @@ async def get_pairing_status(code: str) -> dict[str, Any]:
     """Check pairing status"""
     pairing = await pairing_manager.get_pairing(code)
     return pairing.to_dict()
+
+
+@app.get("/api/pairing/{code}/events")
+async def pairing_events(code: str):
+    """Server-Sent Events endpoint for real-time pairing updates"""
+    pairing = await pairing_manager.get_pairing(code)
+
+    async def event_generator():
+        queue = await pairing_manager.subscribe_to_pairing_updates(pairing.id)
+        try:
+            # Send initial state
+            initial_data = {
+                "type": "pairing_update",
+                "data": pairing.to_dict()
+            }
+            yield f"data: {json.dumps(initial_data)}\n\n"
+
+            while True:
+                try:
+                    # Wait for updates with timeout
+                    update_json = await asyncio.wait_for(queue.get(), timeout=30.0)
+                    yield f"data: {update_json}\n\n"
+                except asyncio.TimeoutError:
+                    # Send heartbeat to keep connection alive
+                    yield ": heartbeat\n\n"
+        except Exception as e:
+            logger.error(f"SSE error for pairing {pairing.id}: {e}")
+        finally:
+            await pairing_manager.unsubscribe_from_pairing_updates(pairing.id, queue)
+
+    return StreamingResponse(
+        event_generator(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "Access-Control-Allow-Origin": "*",
+            "Access-Control-Allow-Headers": "Cache-Control",
+        }
+    )
 
 
 @app.get("/api/pairing/{code}/qrcode")
