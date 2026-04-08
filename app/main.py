@@ -36,7 +36,12 @@ app = FastAPI(title="P2P Transfer", version="1.0.0")
 # Add CORS middleware
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=[
+        "https://nexdroppair.vercel.app/",
+        "http://127.0.0.1:5173",
+        "https://nex-drop.app",
+        "https://www.nex-drop.app",
+    ],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -48,6 +53,11 @@ static_dir.mkdir(parents=True, exist_ok=True)
 app.mount("/static", StaticFiles(directory=static_dir), name="static")
 
 logger = logging.getLogger("p2p_transfer")
+
+
+@app.get("/")
+async def root() -> dict[str, str]:
+    return {"status": "ok"}
 
 
 def _prepare_upload_root(raw_path: Path) -> Path:
