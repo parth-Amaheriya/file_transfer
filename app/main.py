@@ -137,6 +137,12 @@ class PairingCode:
 
         return len(self.peers) != original_count
 
+    @staticmethod
+    def _serialize_datetime(value: Optional[datetime]) -> Optional[str]:
+        if value is None:
+            return None
+        return value.isoformat()
+
     def to_dict(self) -> dict[str, Any]:
         return {
             "id": self.id,
@@ -145,9 +151,9 @@ class PairingCode:
             "initiator": self.initiator.model_dump(),
             "peers": [peer.model_dump() for peer in self.peers],  # Return list of peers
             "peer_count": len(self.peers),  # Also provide peer count
-            "created_at": self.created_at,
-            "connected_at": self.connected_at,
-            "expires_at": self.expires_at,
+            "created_at": self._serialize_datetime(self.created_at),
+            "connected_at": self._serialize_datetime(self.connected_at),
+            "expires_at": self._serialize_datetime(self.expires_at),
         }
 
 
