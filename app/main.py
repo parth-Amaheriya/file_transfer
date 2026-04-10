@@ -519,12 +519,7 @@ from .schemas import SignalingMessage
 @app.post("/api/pairing/{pairing_id}/signaling")
 async def send_signaling_message(pairing_id: str, message: SignalingMessage) -> dict[str, Any]:
     """Send a WebRTC signaling message (offer, answer, or ICE candidate)"""
-    try:
-        pairing = await pairing_manager.get_pairing_by_id(pairing_id)
-        if pairing.status not in ["active", "connected"]:
-            raise HTTPException(status_code=409, detail="Pairing not active")
-    except HTTPException:
-        raise HTTPException(status_code=404, detail="Pairing not found")
+    pairing = await pairing_manager.get_pairing_by_id(pairing_id)
 
     await connection_manager.store_signaling_message(pairing_id, message.model_dump())
     logger.info(f"Signaling message stored for pairing {pairing_id}: {message.type}")
@@ -534,12 +529,7 @@ async def send_signaling_message(pairing_id: str, message: SignalingMessage) -> 
 @app.get("/api/pairing/{pairing_id}/signaling")
 async def get_signaling_messages(pairing_id: str, device_id: str, sender_device_id: str | None = None) -> list[dict[str, Any]]:
     """Get pending WebRTC signaling messages"""
-    try:
-        pairing = await pairing_manager.get_pairing_by_id(pairing_id)
-        if pairing.status not in ["active", "connected"]:
-            raise HTTPException(status_code=409, detail="Pairing not active")
-    except HTTPException:
-        raise HTTPException(status_code=404, detail="Pairing not found")
+    pairing = await pairing_manager.get_pairing_by_id(pairing_id)
 
     messages = await connection_manager.get_signaling_messages(pairing_id, device_id, sender_device_id)
     return messages
