@@ -13,6 +13,7 @@ from uuid import uuid4
 from io import BytesIO
 import base64
 import json
+import os
 
 import qrcode
 from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
@@ -160,6 +161,45 @@ class PairingManager:
         self.codes: dict[str, PairingCode] = {}  # code -> PairingCode mapping
         self.lock = asyncio.Lock()
         self.sse_queues: dict[str, set[asyncio.Queue]] = {}  # pairing_id -> subscriber queues for SSE updates
+        self.persistence_file = uploads_root / "pairings.json"
+        self._load_pairings()
+
+    def _load_pairings(self):
+        """Load pairings from file"""
+        if self.persistence_file.exists():
+            try:
+                with open(self.persistence_file, 'r') as f:
+                    data = json.load(f)
+                    for pairing_data in data.get('pairings', []):
+                        pairing = self._deserialize_pairing(pairing_data)
+                        if not pairing.is_expired():
+                            self.pairings[pairing.id] = pairing
+                            self.codes[pairing.code] = pairing
+                logger.info(f"Loaded {len(self.pairings)} pairings from file")
+            except Exception as e:
+                logger.error(f"Failed to load pairings: {e}")
+
+    def _deserialize_pairing(self, data: dict) -> PairingCode:
+        """Deserialize pairing from dict"""
+        pairing = PairingCode(data['code'], data['initiator'], 3600)  # ttl not used
+        pairing.id = data['id']
+        pairing.status = data['status']
+        pairing.peers = data['peers']
+        pairing.created_at = datetime.fromisoformat(data['created_at'])
+        pairing.connected_at = datetime.fromisoformat(data['connected_at']) if data.get('connected_at') else None
+        pairing.expires_at = datetime.fromisoformat(data['expires_at'])
+        return pairing
+
+    def _save_pairings(self):
+        """Save pairings to file"""
+        try:
+            data = {
+                'pairings': [p.to_dict() for p in self.pairings.values()]
+            }
+            with open(self.persistence_file, 'w') as f:
+                json.dump(data, f, default=str)
+        except Exception as e:
+            logger.error(f"Failed to save pairings: {e}")
 
     async def create_pairing(self, device: DeviceDescriptor) -> PairingCode:
         async with self.lock:
@@ -167,6 +207,7 @@ class PairingManager:
             pairing = PairingCode(code, device, settings.pairing_code_ttl)
             self.pairings[pairing.id] = pairing
             self.codes[code] = pairing
+            self._save_pairings()
             return pairing
 
     async def _generate_unique_code(self) -> str:
@@ -192,6 +233,7 @@ class PairingManager:
             pairing.connect_peer(device)
             # Broadcast the update
             await self.broadcast_pairing_update(pairing)
+            self._save_pairings()
             return pairing
 
     async def get_pairing(self, code: str) -> PairingCode:
@@ -228,6 +270,7 @@ class PairingManager:
 
             # Broadcast the update
             await self.broadcast_pairing_update(pairing)
+            self._save_pairings()
             return pairing
 
     def pause_pairing(self, pairing_id: str) -> None:
@@ -243,6 +286,8 @@ class PairingManager:
             for pid in expired_ids:
                 logger.info(f"Cleaning up expired pairing {pid}")
                 self.pause_pairing(pid)
+            if expired_ids:
+                self._save_pairings()
             return len(expired_ids)
 
     async def subscribe_to_pairing_updates(self, pairing_id: str) -> asyncio.Queue:
