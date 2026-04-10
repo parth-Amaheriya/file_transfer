@@ -164,7 +164,7 @@ class PairingManager:
         self.pairings: dict[str, PairingCode] = {}
         self.codes: dict[str, PairingCode] = {}  # code -> PairingCode mapping
         self.lock = asyncio.Lock()
-        self.sse_queues: dict[str, asyncio.Queue] = {}  # pairing_id -> queue for SSE updates
+        self.sse_queues: dict[str, set[asyncio.Queue]] = {}  # pairing_id -> subscriber queues for SSE updates
 
     async def create_pairing(self, device: DeviceDescriptor) -> PairingCode:
         async with self.lock:
@@ -253,37 +253,41 @@ class PairingManager:
     async def subscribe_to_pairing_updates(self, pairing_id: str) -> asyncio.Queue:
         """Subscribe to SSE updates for a pairing"""
         async with self.lock:
+            queue: asyncio.Queue = asyncio.Queue()
             if pairing_id not in self.sse_queues:
-                self.sse_queues[pairing_id] = asyncio.Queue()
-            return self.sse_queues[pairing_id]
+                self.sse_queues[pairing_id] = set()
+            self.sse_queues[pairing_id].add(queue)
+            return queue
 
     async def broadcast_pairing_update(self, pairing: PairingCode) -> None:
         """Broadcast pairing status update to all SSE subscribers"""
-        if pairing.id in self.sse_queues:
-            update_data = {
-                "type": "pairing_update",
-                "data": pairing.to_dict()
-            }
+        update_data = {
+            "type": "pairing_update",
+            "data": pairing.to_dict()
+        }
+        payload = json.dumps(update_data)
+
+        async with self.lock:
+            queues = list(self.sse_queues.get(pairing.id, set()))
+
+        for queue in queues:
             try:
-                # Don't wait for subscribers to consume, just put in queue
-                await asyncio.wait_for(
-                    self.sse_queues[pairing.id].put(json.dumps(update_data)),
-                    timeout=0.1
-                )
+                # Don't wait for subscribers to consume, just put in each queue
+                await asyncio.wait_for(queue.put(payload), timeout=0.1)
             except asyncio.TimeoutError:
-                # Queue is full, skip this update
+                # Queue is full, skip this subscriber update
                 pass
 
     async def unsubscribe_from_pairing_updates(self, pairing_id: str, queue: asyncio.Queue) -> None:
         """Unsubscribe from SSE updates for a pairing"""
         async with self.lock:
-            if pairing_id in self.sse_queues and self.sse_queues[pairing_id] is queue:
-                # Clear the queue but don't delete it in case others are using it
-                try:
-                    while not queue.empty():
-                        queue.get_nowait()
-                except asyncio.QueueEmpty:
-                    pass
+            queues = self.sse_queues.get(pairing_id)
+            if not queues or queue not in queues:
+                return
+
+            queues.remove(queue)
+            if not queues:
+                self.sse_queues.pop(pairing_id, None)
 
 
 class ConnectionManager:
