@@ -37,7 +37,7 @@ app = FastAPI(title="P2P Transfer", version="1.0.0")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
-        "https://nexdroppair.vercel.app/",
+        "https://nexdroppair.vercel.app",
         "http://127.0.0.1:5173",
         "https://nex-drop.app",
         "https://www.nex-drop.app",
