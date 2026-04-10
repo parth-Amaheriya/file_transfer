@@ -181,10 +181,11 @@ class PairingManager:
 
     def _deserialize_pairing(self, data: dict) -> PairingCode:
         """Deserialize pairing from dict"""
-        pairing = PairingCode(data['code'], data['initiator'], 3600)  # ttl not used
+        initiator = DeviceDescriptor.model_validate(data["initiator"])
+        pairing = PairingCode(data["code"], initiator, 3600)  # ttl not used
         pairing.id = data['id']
         pairing.status = data['status']
-        pairing.peers = data['peers']
+        pairing.peers = [DeviceDescriptor.model_validate(peer) for peer in data.get("peers", [])]
         pairing.created_at = datetime.fromisoformat(data['created_at'])
         pairing.connected_at = datetime.fromisoformat(data['connected_at']) if data.get('connected_at') else None
         pairing.expires_at = datetime.fromisoformat(data['expires_at'])
@@ -218,6 +219,7 @@ class PairingManager:
                 return code
 
     async def join_pairing(self, code: str, device: DeviceDescriptor) -> PairingCode:
+        should_broadcast = False
         async with self.lock:
             normalized_code = code.strip().upper()
             pairing = self.codes.get(normalized_code)
@@ -231,10 +233,13 @@ class PairingManager:
 
             # Allow multiple devices to join - removed the "already used" check
             pairing.connect_peer(device)
-            # Broadcast the update
-            await self.broadcast_pairing_update(pairing)
             self._save_pairings()
-            return pairing
+            should_broadcast = True
+
+        if should_broadcast:
+            await self.broadcast_pairing_update(pairing)
+
+        return pairing
 
     async def get_pairing(self, code: str) -> PairingCode:
         normalized_code = code.strip().upper()
@@ -259,6 +264,7 @@ class PairingManager:
         return pairing
 
     async def remove_peer(self, pairing_id: str, peer_identifier: str) -> PairingCode:
+        should_broadcast = False
         async with self.lock:
             pairing = self.pairings.get(pairing_id)
             if not pairing:
@@ -268,10 +274,13 @@ class PairingManager:
             if not removed:
                 return pairing
 
-            # Broadcast the update
-            await self.broadcast_pairing_update(pairing)
             self._save_pairings()
-            return pairing
+            should_broadcast = True
+
+        if should_broadcast:
+            await self.broadcast_pairing_update(pairing)
+
+        return pairing
 
     def pause_pairing(self, pairing_id: str) -> None:
         """Remove expired pairing"""
