@@ -14,6 +14,7 @@ from io import BytesIO
 import base64
 import json
 import os
+from urllib.parse import quote
 
 import qrcode
 from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
@@ -32,12 +33,12 @@ from .schemas import (
 )
 
 settings = get_settings()
-app = FastAPI(title="P2P Transfer", version="1.0.0",docs_url="/nex-drop-docs")
+app = FastAPI(title="Nex-Drop - Next Gen Data Transfer", version="1.0.0",docs_url="/nex-drop-docs")
 
 # Add CORS middleware
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # Allow all origins for production
+    allow_origins=["https://www.nex-drop.app/"],  # Allow all origins for production
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -80,6 +81,11 @@ logger.info(f"Final uploads root: {uploads_root}")
 
 PAIRING_CODE_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
 PAIRING_CODE_LENGTH = 6
+
+
+def _build_pairing_join_url(request: Request, code: str) -> str:
+    base_url = (settings.frontend_url or request.headers.get("origin") or str(request.base_url)).rstrip("/")
+    return f"{base_url}/session?joinCode={quote(code)}"
 
 
 class PairingCode:
@@ -530,10 +536,12 @@ async def pairing_events(code: str):
 
 
 @app.get("/api/pairing/{code}/qrcode")
-async def generate_qrcode(code: str) -> dict[str, Any]:
+async def generate_qrcode(code: str, request: Request) -> dict[str, Any]:
     """Generate QR code for pairing code"""
     # Verify pairing code exists
     pairing = await pairing_manager.get_pairing(code)
+
+    join_url = _build_pairing_join_url(request, pairing.code)
     
     # Generate QR code
     qr = qrcode.QRCode(
@@ -543,8 +551,8 @@ async def generate_qrcode(code: str) -> dict[str, Any]:
         border=4,
     )
     
-    # Use direct pairing code for scanning
-    qr.add_data(code)
+    # Encode the full join URL so a scan opens the app directly.
+    qr.add_data(join_url)
     qr.make(fit=True)
     img = qr.make_image(fill_color="black", back_color="white")
     
@@ -556,7 +564,7 @@ async def generate_qrcode(code: str) -> dict[str, Any]:
     data_url = f"data:image/png;base64,{img_base64}"
     
     logger.info(f"QR code generated for pairing code: {code}")
-    return {"code": code, "qrcode": data_url}
+    return {"code": code, "url": join_url, "qrcode": data_url}
 
 
 # ============================================================================

@@ -37,13 +37,14 @@ Open `http://localhost:8000` to access the pairing dashboard.
 | `UPLOADS_PATH` | Directory for temporary file staging | `backend/uploads` |
 | `PAIRING_CODE_TTL` | Pairing code timeout in seconds | `3600` (1 hour) |
 | `MAX_CONNECTIONS` | Max concurrent pairings allowed | `100` |
+| `FRONTEND_URL` | Public frontend URL used in generated QR links | browser origin or backend URL fallback |
 
 **Note**: No MongoDB configuration needed!
 
 ## How It Works
 
 1. **Device A generates** a 6-character code via `POST /api/pairing/initiate`
-2. **Device A shares** the code with Device B securely
+2. **Device A shares** the QR link or code with Device B securely
 3. **Device B joins** via `POST /api/pairing/join/{code}`
 4. Both devices connect via `WebSocket /ws/pairing/{pairing_id}/{device_id}`
 5. Messages relay directly between devices (server only forwards)

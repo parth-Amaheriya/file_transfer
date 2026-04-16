@@ -10,6 +10,7 @@ class Settings(BaseSettings):
     uploads_path: str = "../uploads"  # Relative to backend directory
     pairing_code_ttl: int = 3600  # 1 hour in seconds
     max_connections: int = 50
+    frontend_url: str | None = None
 
     model_config = {
         "env_file": BASE_DIR / ".env",
