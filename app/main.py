@@ -32,7 +32,7 @@ from .schemas import (
 )
 
 settings = get_settings()
-app = FastAPI(title="P2P Transfer", version="1.0.0",docs_url=None, redoc_url=None, openapi_url=None)
+app = FastAPI(title="P2P Transfer", version="1.0.0",docs_url="/nex-drop-docs", redoc_url=None, openapi_url=None)
 
 # Add CORS middleware
 app.add_middleware(
