@@ -38,7 +38,7 @@ app = FastAPI(title="Nex-Drop - Next Gen Data Transfer", version="1.0.0",docs_ur
 # Add CORS middleware
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["https://www.nex-drop.app/"],  # Allow all origins for production
+    allow_origins=["https://www.nex-drop.app/","https://nexdroppair.vercel.app/"],  # Allow all origins for production
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
