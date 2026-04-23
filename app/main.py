@@ -17,18 +17,28 @@ import os
 from urllib.parse import quote
 
 import qrcode
-from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
+from fastapi import Depends, FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
+from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
+from .admin_store import AdminStore
 from .config import get_settings
 from .schemas import (
+    AdminDashboardOut,
+    AdminLoginRequest,
+    AdminLoginResponse,
+    AdminSettingsUpdate,
+    AdminUserOut,
+    AuditLogEntry,
     DeviceDescriptor,
     FileTransferMessage,
     PairingCodeCreate,
     PairingCodeJoin,
     PairingCodeOut,
+    PublicConfigOut,
+    RuntimeSettings,
     TextMessage,
 )
 
@@ -38,7 +48,12 @@ app = FastAPI(title="Nex-Drop - Next Gen Data Transfer", version="1.0.0",docs_ur
 # Add CORS middleware
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["https://nexdroppair.vercel.app", "https://www.nex-drop.app"],  
+    allow_origins=[
+        "https://nexdroppair.vercel.app",
+        "https://www.nex-drop.app",
+        "http://localhost:5173",
+        "http://127.0.0.1:5173",
+    ],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -88,6 +103,30 @@ def _build_pairing_join_url(request: Request, code: str) -> str:
     return f"{base_url}/session?joinCode={quote(code)}"
 
 
+admin_store = AdminStore(settings)
+runtime_settings = RuntimeSettings()
+bearer_scheme = HTTPBearer(auto_error=False)
+
+
+class SlidingWindowRateLimiter:
+    def __init__(self) -> None:
+        self.events: dict[str, list[float]] = {}
+        self.lock = asyncio.Lock()
+
+    async def check(self, key: str, limit: int, window_seconds: int = 60) -> None:
+        now = time.time()
+        async with self.lock:
+            recent_events = [timestamp for timestamp in self.events.get(key, []) if now - timestamp < window_seconds]
+            if len(recent_events) >= limit:
+                raise HTTPException(status_code=429, detail="Rate limit exceeded")
+            recent_events.append(now)
+            self.events[key] = recent_events
+
+
+pairing_rate_limiter = SlidingWindowRateLimiter()
+admin_rate_limiter = SlidingWindowRateLimiter()
+
+
 class PairingCode:
     """In-memory pairing code with expiration - supports multiple devices"""
 
@@ -105,12 +144,21 @@ class PairingCode:
         self.created_at = datetime.utcnow()
         self.connected_at: Optional[datetime] = None
         self.expires_at = self.created_at + timedelta(seconds=ttl_seconds)
+        self.terminated_at: Optional[datetime] = None
+        self.termination_reason: Optional[str] = None
+
+    @property
+    def device_count(self) -> int:
+        return 1 + len(self.peers)
 
     def is_expired(self) -> bool:
-        return datetime.utcnow() > self.expires_at
+        return self.status != "terminated" and datetime.utcnow() > self.expires_at
 
     def connect_peer(self, peer: DeviceDescriptor) -> None:
         """Add a peer to the connection - supports multiple peers"""
+        if self.status == "terminated":
+            raise ValueError("Pairing has been terminated")
+
         if self.is_expired():
             self.status = "expired"
             raise ValueError("Pairing code expired")
@@ -127,8 +175,16 @@ class PairingCode:
             self.status = "connected"
             self.connected_at = datetime.utcnow()
 
+    def terminate(self, reason: str) -> None:
+        self.status = "terminated"
+        self.terminated_at = datetime.utcnow()
+        self.termination_reason = reason
+
     def remove_peer(self, peer_identifier: str) -> bool:
         """Remove a peer from the pairing."""
+        if self.status == "terminated":
+            return False
+
         original_count = len(self.peers)
         self.peers = [peer for peer in self.peers if peer.identifier != peer_identifier]
 
@@ -153,9 +209,12 @@ class PairingCode:
             "initiator": self.initiator.model_dump(),
             "peers": [peer.model_dump() for peer in self.peers],  # Return list of peers
             "peer_count": len(self.peers),  # Also provide peer count
+            "device_count": self.device_count,
             "created_at": self._serialize_datetime(self.created_at),
             "connected_at": self._serialize_datetime(self.connected_at),
             "expires_at": self._serialize_datetime(self.expires_at),
+            "terminated_at": self._serialize_datetime(self.terminated_at),
+            "termination_reason": self.termination_reason,
         }
 
 
@@ -195,6 +254,8 @@ class PairingManager:
         pairing.created_at = datetime.fromisoformat(data['created_at'])
         pairing.connected_at = datetime.fromisoformat(data['connected_at']) if data.get('connected_at') else None
         pairing.expires_at = datetime.fromisoformat(data['expires_at'])
+        pairing.terminated_at = datetime.fromisoformat(data['terminated_at']) if data.get('terminated_at') else None
+        pairing.termination_reason = data.get('termination_reason')
         return pairing
 
     def _save_pairings(self):
@@ -208,10 +269,15 @@ class PairingManager:
         except Exception as e:
             logger.error(f"Failed to save pairings: {e}")
 
-    async def create_pairing(self, device: DeviceDescriptor) -> PairingCode:
+    async def create_pairing(self, device: DeviceDescriptor, client_key: str) -> PairingCode:
+        if runtime_settings.maintenance_mode != "off":
+            raise HTTPException(status_code=503, detail="Pairing creation is disabled during maintenance")
+
+        await pairing_rate_limiter.check(f"create:{client_key}", runtime_settings.policy.pairing_rate_limit_per_minute)
+
         async with self.lock:
             code = await self._generate_unique_code()
-            pairing = PairingCode(code, device, settings.pairing_code_ttl)
+            pairing = PairingCode(code, device, runtime_settings.policy.pairing_ttl_seconds)
             self.pairings[pairing.id] = pairing
             self.codes[code] = pairing
             self._save_pairings()
@@ -224,8 +290,13 @@ class PairingManager:
             if code not in self.codes:
                 return code
 
-    async def join_pairing(self, code: str, device: DeviceDescriptor) -> PairingCode:
+    async def join_pairing(self, code: str, device: DeviceDescriptor, client_key: str) -> PairingCode:
         should_broadcast = False
+        if runtime_settings.maintenance_mode != "off":
+            raise HTTPException(status_code=503, detail="Joining pairings is disabled during maintenance")
+
+        await pairing_rate_limiter.check(f"join:{client_key}", runtime_settings.policy.pairing_rate_limit_per_minute)
+
         async with self.lock:
             normalized_code = code.strip().upper()
             pairing = self.codes.get(normalized_code)
@@ -233,9 +304,16 @@ class PairingManager:
             if not pairing:
                 raise HTTPException(status_code=404, detail="Pairing code not found")
 
+            if pairing.status == "terminated":
+                raise HTTPException(status_code=410, detail="Pairing has been terminated")
+
             if pairing.is_expired():
                 self.pause_pairing(pairing.id)
                 raise HTTPException(status_code=410, detail="Pairing code expired")
+
+            existing_peer = next((peer for peer in pairing.peers if peer.identifier == device.identifier), None)
+            if existing_peer is None and pairing.device_count >= runtime_settings.policy.max_devices_per_session:
+                raise HTTPException(status_code=409, detail="Maximum devices per session reached")
 
             # Allow multiple devices to join - removed the "already used" check
             pairing.connect_peer(device)
@@ -254,6 +332,9 @@ class PairingManager:
         if not pairing:
             raise HTTPException(status_code=404, detail="Pairing code not found")
 
+        if pairing.status == "terminated":
+            raise HTTPException(status_code=410, detail="Pairing has been terminated")
+
         if pairing.is_expired():
             self.pause_pairing(pairing.id)
             raise HTTPException(status_code=410, detail="Pairing code expired")
@@ -264,6 +345,8 @@ class PairingManager:
         pairing = self.pairings.get(pairing_id)
         if not pairing:
             raise HTTPException(status_code=404, detail="Pairing not found")
+        if pairing.status == "terminated":
+            raise HTTPException(status_code=410, detail="Pairing has been terminated")
         if pairing.is_expired():
             self.pause_pairing(pairing_id)
             raise HTTPException(status_code=410, detail="Pairing expired")
@@ -293,6 +376,37 @@ class PairingManager:
         pairing = self.pairings.pop(pairing_id, None)
         if pairing:
             self.codes.pop(pairing.code, None)
+
+    async def terminate_pairing(self, pairing_id: str, reason: str) -> PairingCode:
+        async with self.lock:
+            pairing = self.pairings.get(pairing_id)
+            if not pairing:
+                raise HTTPException(status_code=404, detail="Pairing not found")
+
+            pairing.terminate(reason)
+            self._save_pairings()
+
+        await self.broadcast_pairing_update(pairing)
+
+        async with self.lock:
+            self.pause_pairing(pairing_id)
+            self._save_pairings()
+
+        return pairing
+
+    async def list_active_pairings(self) -> list[PairingCode]:
+        async with self.lock:
+            return [pairing for pairing in self.pairings.values() if pairing.status != "terminated" and not pairing.is_expired()]
+
+    async def terminate_all_pairings(self, reason: str) -> list[PairingCode]:
+        async with self.lock:
+            pairings = [pairing for pairing in self.pairings.values() if pairing.status != "terminated"]
+
+        terminated_pairings: list[PairingCode] = []
+        for pairing in pairings:
+            terminated_pairings.append(await self.terminate_pairing(pairing.id, reason))
+
+        return terminated_pairings
 
     async def cleanup_expired(self) -> int:
         """Periodic cleanup of expired pairings"""
@@ -372,8 +486,59 @@ class ConnectionManager:
                     self.websocket_connections.pop(pairing_id, None)
             logger.info(f"Disconnected device {device_id} from pairing {pairing_id}")
 
+    async def disconnect_pairing(self, pairing_id: str, reason: str = "admin_disconnect") -> int:
+        async with self.lock:
+            connections = self.websocket_connections.pop(pairing_id, {})
+
+        for websocket in connections.values():
+            try:
+                await websocket.close(code=4001, reason=reason)
+            except Exception:
+                pass
+
+        return len(connections)
+
+    async def disconnect_device(self, pairing_id: str, device_id: str, reason: str = "admin_disconnect") -> bool:
+        async with self.lock:
+            websocket = self.websocket_connections.get(pairing_id, {}).pop(device_id, None)
+            if self.websocket_connections.get(pairing_id) == {}:
+                self.websocket_connections.pop(pairing_id, None)
+
+        if websocket is None:
+            return False
+
+        try:
+            await websocket.close(code=4001, reason=reason)
+        except Exception:
+            pass
+        return True
+
+    async def disconnect_all_pairings(self, reason: str = "admin_shutdown") -> int:
+        async with self.lock:
+            connections = self.websocket_connections
+            self.websocket_connections = {}
+
+        closed_count = 0
+        for pairing_connections in connections.values():
+            for websocket in pairing_connections.values():
+                try:
+                    await websocket.close(code=4001, reason=reason)
+                    closed_count += 1
+                except Exception:
+                    pass
+
+        return closed_count
+
     async def send_to_peer(self, pairing_id: str, sender_device_id: str, message: dict[str, Any]) -> bool:
         """Broadcast message to all peer devices (except sender)"""
+        message_type = message.get("type")
+        if message_type == "text" and not runtime_settings.feature_flags.messaging:
+            return False
+        if message_type == "text" and message.get("isCode") and not runtime_settings.feature_flags.code_sharing:
+            return False
+        if message_type in {"file_init", "file_chunk", "file_end", "file_shared"} and not runtime_settings.feature_flags.file_transfer:
+            return False
+
         peer_device_ids = []
         websockets = []
         
@@ -455,24 +620,187 @@ pairing_manager = PairingManager()
 connection_manager = ConnectionManager()
 
 
+def _request_client_key(request: Request) -> str:
+    if request.client and request.client.host:
+        return request.client.host
+    return "unknown"
+
+
+async def _get_admin_user(credentials: HTTPAuthorizationCredentials | None = Depends(bearer_scheme)) -> AdminUserOut:
+    if credentials is None or not credentials.credentials:
+        raise HTTPException(status_code=401, detail="Admin authentication required")
+
+    try:
+        return await admin_store.authenticate_token(credentials.credentials)
+    except ValueError as error:
+        raise HTTPException(status_code=401, detail=str(error)) from error
+
+
+def _require_admin_role(minimum_role: str):
+    async def dependency(user: AdminUserOut = Depends(_get_admin_user)) -> AdminUserOut:
+        role_order = {"viewer": 0, "operator": 1, "admin": 2, "owner": 3}
+        if role_order.get(user.role, 0) < role_order.get(minimum_role, 0):
+            raise HTTPException(status_code=403, detail="Insufficient admin role")
+        return user
+
+    return dependency
+
+
 # ============================================================================
 # REST API Endpoints
 # ============================================================================
 
 
+@app.get("/api/runtime-config", response_model=PublicConfigOut)
+async def get_runtime_config() -> PublicConfigOut:
+    global runtime_settings
+    runtime_settings = await admin_store.get_runtime_settings()
+    return runtime_settings
+
+
+@app.post("/api/admin/login", response_model=AdminLoginResponse)
+async def admin_login(body: AdminLoginRequest, request: Request) -> AdminLoginResponse:
+    await admin_rate_limiter.check(f"login:{_request_client_key(request)}", runtime_settings.policy.admin_rate_limit_per_minute)
+
+    try:
+        token, user, expires_at = await admin_store.authenticate(body)
+    except ValueError as error:
+        await admin_store.append_audit_log(
+            actor=AdminUserOut(username=body.username, role="viewer"),
+            action="login",
+            target=body.username,
+            status="denied",
+            metadata={"error": str(error)},
+        )
+        raise HTTPException(status_code=401, detail="Invalid admin credentials") from error
+
+    return AdminLoginResponse(
+        token=token,
+        user=user,
+        expires_at=expires_at,
+        settings=await admin_store.get_runtime_settings(),
+    )
+
+
+@app.post("/api/admin/logout")
+async def admin_logout(user: AdminUserOut = Depends(_get_admin_user), credentials: HTTPAuthorizationCredentials | None = Depends(bearer_scheme)) -> dict[str, str]:
+    if credentials is not None and credentials.credentials:
+        await admin_store.revoke_token(credentials.credentials)
+
+    await admin_store.append_audit_log(actor=user, action="logout", target=user.username)
+    return {"status": "ok"}
+
+
+@app.get("/api/admin/dashboard", response_model=AdminDashboardOut)
+async def admin_dashboard(user: AdminUserOut = Depends(_get_admin_user)) -> AdminDashboardOut:
+    sessions = await pairing_manager.list_active_pairings()
+    audit_log = await admin_store.list_audit_log(limit=25)
+    await admin_store.append_audit_log(actor=user, action="view_dashboard", target="admin_dashboard")
+    return AdminDashboardOut(
+        current_user=user,
+        settings=await admin_store.get_runtime_settings(),
+        sessions=[pairing.to_dict() for pairing in sessions],
+        audit_log=audit_log,
+    )
+
+
+@app.get("/api/admin/sessions", response_model=list[PairingCodeOut])
+async def admin_sessions(user: AdminUserOut = Depends(_get_admin_user)) -> list[dict[str, Any]]:
+    sessions = await pairing_manager.list_active_pairings()
+    await admin_store.append_audit_log(actor=user, action="list_sessions", target="active_sessions")
+    return [pairing.to_dict() for pairing in sessions]
+
+
+@app.post("/api/admin/sessions/{pairing_id}/disconnect")
+async def admin_disconnect_session(
+    pairing_id: str,
+    request: Request,
+    user: AdminUserOut = Depends(_require_admin_role("operator")),
+) -> dict[str, Any]:
+    disconnected_count = await connection_manager.disconnect_pairing(pairing_id, reason="admin_disconnect")
+    pairing = await pairing_manager.terminate_pairing(pairing_id, "admin_disconnect")
+    await admin_store.append_audit_log(
+        actor=user,
+        action="disconnect_session",
+        target=pairing_id,
+        metadata={"device_count": pairing.device_count, "closed_connections": disconnected_count, "client": _request_client_key(request)},
+    )
+    return {"status": "ok", "pairing_id": pairing_id, "closed_connections": disconnected_count}
+
+
+@app.post("/api/admin/sessions/{pairing_id}/devices/{device_id}/disconnect")
+async def admin_disconnect_device(
+    pairing_id: str,
+    device_id: str,
+    request: Request,
+    user: AdminUserOut = Depends(_require_admin_role("operator")),
+) -> dict[str, Any]:
+    pairing = await pairing_manager.get_pairing_by_id(pairing_id)
+
+    if device_id == pairing.initiator.identifier:
+        disconnected = await connection_manager.disconnect_pairing(pairing_id, reason="admin_disconnect")
+        pairing = await pairing_manager.terminate_pairing(pairing_id, "admin_disconnect")
+    else:
+        disconnected = await connection_manager.disconnect_device(pairing_id, device_id, reason="admin_disconnect")
+        pairing = await pairing_manager.remove_peer(pairing_id, device_id)
+
+    await admin_store.append_audit_log(
+        actor=user,
+        action="disconnect_device",
+        target=f"{pairing_id}:{device_id}",
+        metadata={"disconnected": disconnected, "remaining_devices": pairing.device_count, "client": _request_client_key(request)},
+    )
+    return {"status": "ok", "pairing_id": pairing_id, "device_id": device_id, "disconnected": disconnected}
+
+
+@app.get("/api/admin/audit-log", response_model=list[AuditLogEntry])
+async def admin_audit_log(user: AdminUserOut = Depends(_get_admin_user)) -> list[AuditLogEntry]:
+    await admin_store.append_audit_log(actor=user, action="view_audit_log", target="audit_log")
+    return await admin_store.list_audit_log(limit=100)
+
+
+@app.put("/api/admin/settings", response_model=PublicConfigOut)
+async def update_admin_settings(
+    body: AdminSettingsUpdate,
+    user: AdminUserOut = Depends(_require_admin_role("admin")),
+) -> PublicConfigOut:
+    global runtime_settings
+
+    new_settings = RuntimeSettings.model_validate(body.model_dump(mode="python"))
+    previous_settings = runtime_settings
+    runtime_settings = await admin_store.update_runtime_settings(user, new_settings, metadata={"source": "admin_settings_update"})
+
+    if previous_settings.maintenance_mode != "shutdown" and runtime_settings.maintenance_mode == "shutdown":
+        active_pairings = await pairing_manager.list_active_pairings()
+        for pairing in active_pairings:
+            await connection_manager.disconnect_pairing(pairing.id, reason="maintenance_shutdown")
+        await pairing_manager.terminate_all_pairings("maintenance_shutdown")
+
+    await admin_store.append_audit_log(
+        actor=user,
+        action="update_settings",
+        target="runtime_settings",
+        before=previous_settings.model_dump(mode="python"),
+        after=runtime_settings.model_dump(mode="python"),
+        metadata={"client": user.username},
+    )
+
+    return runtime_settings
+
+
 @app.post("/api/pairing/initiate", response_model=PairingCodeOut)
-async def initiate_pairing(body: PairingCodeCreate) -> dict[str, Any]:
+async def initiate_pairing(body: PairingCodeCreate, request: Request) -> dict[str, Any]:
     """Device A initiates a pairing and gets a code"""
-    pairing = await pairing_manager.create_pairing(body.device)
+    pairing = await pairing_manager.create_pairing(body.device, _request_client_key(request))
     logger.info(f"Pairing initiated: {pairing.code} by {body.device.identifier}, ID: {pairing.id}")
     return pairing.to_dict()
 
 
 @app.post("/api/pairing/join/{code}", response_model=PairingCodeOut)
-async def join_pairing(code: str, body: PairingCodeJoin) -> dict[str, Any]:
+async def join_pairing(code: str, body: PairingCodeJoin, request: Request) -> dict[str, Any]:
     """Device B joins a pairing using the code"""
     logger.info(f"Join request for code: {code}")
-    pairing = await pairing_manager.join_pairing(code, body.device)
+    pairing = await pairing_manager.join_pairing(code, body.device, _request_client_key(request))
     logger.info(
         f"Pairing joined: {code} by {body.device.identifier}. "
         f"Pairing ID: {pairing.id}, Status: {pairing.status}"
@@ -605,6 +933,10 @@ async def websocket_peer_connection(pairing_id: str, device_id: str, ws: WebSock
     try:
         pairing = await pairing_manager.get_pairing_by_id(pairing_id)
         logger.info(f"Found pairing {pairing_id}, status: {pairing.status}, code: {pairing.code}")
+
+        if runtime_settings.maintenance_mode == "shutdown":
+            await ws.close(code=4001, reason="Maintenance mode shutdown")
+            return
         
         # Allow connections for pending, active, and connected states (for multi-device scenarios)
         if pairing.status not in ["pending", "active", "connected"]:
@@ -658,6 +990,15 @@ async def websocket_peer_connection(pairing_id: str, device_id: str, ws: WebSock
 @app.on_event("startup")
 async def startup_cleanup():
     """Start periodic cleanup of expired pairings"""
+    global runtime_settings
+
+    await admin_store.initialize()
+    runtime_settings = await admin_store.get_runtime_settings()
+
+    if runtime_settings.maintenance_mode == "shutdown":
+        await connection_manager.disconnect_all_pairings("maintenance_shutdown")
+        await pairing_manager.terminate_all_pairings("maintenance_shutdown")
+
     async def cleanup_task():
         while True:
             await asyncio.sleep(60)  # Run every minute
