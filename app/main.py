@@ -27,10 +27,15 @@ from .admin_store import AdminStore
 from .config import get_settings
 from .schemas import (
     AdminDashboardOut,
+    AdminForgotPasswordRequest,
+    AdminForgotPasswordVerifyRequest,
     AdminLoginRequest,
     AdminLoginResponse,
+    AdminResetPasswordRequest,
     AdminSettingsUpdate,
+    AdminUserCreate,
     AdminUserOut,
+    AdminUserUpdate,
     AuditLogEntry,
     DeviceDescriptor,
     FileTransferMessage,
@@ -51,7 +56,7 @@ app.add_middleware(
     allow_origins=[
         "https://nexdroppair.vercel.app",
         "https://www.nex-drop.app",
-        "http://localhost:5173",
+        "http://localhost:8080",
         "http://127.0.0.1:5173",
     ],
     allow_credentials=True,
@@ -65,6 +70,12 @@ static_dir.mkdir(parents=True, exist_ok=True)
 app.mount("/static", StaticFiles(directory=static_dir), name="static")
 
 logger = logging.getLogger("p2p_transfer")
+
+# Configure logging to print to console
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+)
 
 
 @app.get("/")
@@ -666,9 +677,9 @@ async def admin_login(body: AdminLoginRequest, request: Request) -> AdminLoginRe
         token, user, expires_at = await admin_store.authenticate(body)
     except ValueError as error:
         await admin_store.append_audit_log(
-            actor=AdminUserOut(username=body.username, role="viewer"),
+            actor=AdminUserOut(username=body.email, email=body.email, role="viewer"),
             action="login",
-            target=body.username,
+            target=body.email,
             status="denied",
             metadata={"error": str(error)},
         )
@@ -680,6 +691,18 @@ async def admin_login(body: AdminLoginRequest, request: Request) -> AdminLoginRe
         expires_at=expires_at,
         settings=await admin_store.get_runtime_settings(),
     )
+
+
+async def _resolve_admin_username(*, username: str | None = None, email: str | None = None) -> str | None:
+    if username:
+        return username
+
+    if email:
+        user = await admin_store.get_user_by_email(email)
+        if user:
+            return user.username
+
+    return None
 
 
 @app.post("/api/admin/logout")
@@ -980,6 +1003,295 @@ async def websocket_peer_connection(pairing_id: str, device_id: str, ws: WebSock
 # ============================================================================
 # UI Endpoints
 # ============================================================================
+
+
+# ============================================================================
+# Forgot Password Endpoints
+# ============================================================================
+
+
+@app.post("/api/admin/forgot-password")
+async def admin_forgot_password(
+    body: AdminForgotPasswordRequest,
+    request: Request,
+) -> dict[str, str]:
+    """Request a password reset OTP"""
+    await admin_rate_limiter.check(f"forgot_password:{_request_client_key(request)}", runtime_settings.policy.admin_rate_limit_per_minute)
+
+    username = await _resolve_admin_username(username=body.username, email=body.email)
+    if not username:
+        logger.info(f"Forgot password request for identifier: {body.email or body.username or 'unknown'}")
+        return {"message": "If the user exists, an OTP has been sent"}
+
+    user = await admin_store.get_user(username)
+    if not user:
+        logger.info(f"Forgot password request for user: {username}")
+        return {"message": "If the user exists, an OTP has been sent"}
+
+    otp = await admin_store.generate_otp(username)
+    await admin_store.send_forgot_password_email(username, otp)
+    
+    await admin_store.append_audit_log(
+        actor=AdminUserOut(username=username, email=user.email, role="viewer"),
+        action="forgot_password",
+        target=username,
+        status="success",
+        metadata={"source": "admin_forgot_password", "client": _request_client_key(request)},
+    )
+    
+    return {"message": "If the user exists, an OTP has been sent"}
+
+
+@app.post("/api/admin/verify-otp")
+async def admin_verify_otp(
+    body: AdminForgotPasswordVerifyRequest,
+    request: Request,
+) -> dict[str, str]:
+    """Verify the OTP for password reset"""
+    await admin_rate_limiter.check(f"verify_otp:{_request_client_key(request)}", runtime_settings.policy.admin_rate_limit_per_minute)
+
+    username = await _resolve_admin_username(username=body.username, email=body.email)
+    if not username:
+        await admin_store.append_audit_log(
+            actor=AdminUserOut(username=body.email or body.username or "unknown", email=body.email, role="viewer"),
+            action="verify_otp",
+            target=body.email or body.username,
+            status="denied",
+            metadata={"source": "admin_verify_otp", "client": _request_client_key(request)},
+        )
+        raise HTTPException(status_code=400, detail="Invalid or expired OTP")
+
+    is_valid = await admin_store.verify_otp(username, body.otp, consume=False)
+    
+    if not is_valid:
+        await admin_store.append_audit_log(
+            actor=AdminUserOut(username=username, email=body.email, role="viewer"),
+            action="verify_otp",
+            target=body.email or username,
+            status="denied",
+            metadata={"source": "admin_verify_otp", "client": _request_client_key(request)},
+        )
+        raise HTTPException(status_code=400, detail="Invalid or expired OTP")
+    
+    await admin_store.append_audit_log(
+        actor=AdminUserOut(username=username, email=body.email, role="viewer"),
+        action="verify_otp",
+        target=body.email or username,
+        status="success",
+        metadata={"source": "admin_verify_otp", "client": _request_client_key(request)},
+    )
+    
+    return {"message": "OTP verified successfully"}
+
+
+@app.post("/api/admin/reset-password")
+async def admin_reset_password(
+    body: AdminResetPasswordRequest,
+    request: Request,
+) -> dict[str, str]:
+    """Reset password after OTP verification"""
+    await admin_rate_limiter.check(f"reset_password:{_request_client_key(request)}", runtime_settings.policy.admin_rate_limit_per_minute)
+
+    username = await _resolve_admin_username(username=body.username, email=body.email)
+    if not username:
+        await admin_store.append_audit_log(
+            actor=AdminUserOut(username=body.email or body.username or "unknown", email=body.email, role="viewer"),
+            action="reset_password",
+            target=body.email or body.username,
+            status="denied",
+            metadata={"source": "admin_reset_password", "client": _request_client_key(request)},
+        )
+        raise HTTPException(status_code=400, detail="Invalid or expired OTP")
+
+    # Consume OTP only when the password reset is finalized.
+    is_valid = await admin_store.verify_otp(username, body.otp, consume=True)
+    
+    if not is_valid:
+        await admin_store.append_audit_log(
+            actor=AdminUserOut(username=username, email=body.email, role="viewer"),
+            action="reset_password",
+            target=body.email or username,
+            status="denied",
+            metadata={"source": "admin_reset_password", "client": _request_client_key(request)},
+        )
+        raise HTTPException(status_code=400, detail="Invalid or expired OTP")
+    
+    # Reset password
+    success = await admin_store.reset_password(username, body.new_password)
+    
+    if not success:
+        await admin_store.append_audit_log(
+            actor=AdminUserOut(username=username, email=body.email, role="viewer"),
+            action="reset_password",
+            target=body.email or username,
+            status="denied",
+            metadata={"source": "admin_reset_password", "client": _request_client_key(request)},
+        )
+        raise HTTPException(status_code=404, detail="User not found")
+    
+    await admin_store.append_audit_log(
+        actor=AdminUserOut(username=username, email=body.email, role="viewer"),
+        action="reset_password",
+        target=body.email or username,
+        status="success",
+        metadata={"source": "admin_reset_password", "client": _request_client_key(request)},
+    )
+    
+    return {"message": "Password reset successfully"}
+
+
+# ============================================================================
+# Admin User Management Endpoints
+# ============================================================================
+
+
+@app.get("/api/admin/users", response_model=list[AdminUserOut])
+async def list_admin_users(
+    user: AdminUserOut = Depends(_get_admin_user),
+) -> list[AdminUserOut]:
+    """List all admin users (only owner can access)"""
+    if user.role != "owner":
+        raise HTTPException(status_code=403, detail="Insufficient permissions. Only owner can list users.")
+    
+    users = await admin_store.list_users()
+    return [admin_store._user_to_public(user) for user in users]
+
+
+@app.post("/api/admin/users", response_model=AdminUserOut)
+async def create_admin_user(
+    body: AdminUserCreate,
+    request: Request,
+    user: AdminUserOut = Depends(_get_admin_user),
+) -> AdminUserOut:
+    """Create a new admin user (only owner can do this)"""
+    if user.role != "owner":
+        raise HTTPException(status_code=403, detail="Insufficient permissions. Only owner can create users.")
+    
+    await admin_rate_limiter.check(f"create_user:{_request_client_key(request)}", runtime_settings.policy.admin_rate_limit_per_minute)
+    
+    try:
+        new_user = await admin_store.create_user(
+            username=body.username,
+            email=body.email,
+            password=body.password,
+            role=body.role,
+            display_name=body.display_name,
+        )
+        
+        await admin_store.append_audit_log(
+            actor=user,
+            action="create_user",
+            target=body.username,
+            status="success",
+            metadata={
+                "email": body.email,
+                "role": body.role,
+                "display_name": body.display_name,
+                "client": _request_client_key(request),
+            },
+        )
+        
+        return admin_store._user_to_public(new_user)
+    except ValueError as e:
+        await admin_store.append_audit_log(
+            actor=user,
+            action="create_user",
+            target=body.username,
+            status="denied",
+            metadata={"error": str(e), "client": _request_client_key(request)},
+        )
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@app.put("/api/admin/users/{username}", response_model=AdminUserOut)
+async def update_admin_user(
+    username: str,
+    body: AdminUserUpdate,
+    request: Request,
+    user: AdminUserOut = Depends(_get_admin_user),
+) -> AdminUserOut:
+    """Update an admin user (only owner can do this)"""
+    if user.role != "owner":
+        raise HTTPException(status_code=403, detail="Insufficient permissions. Only owner can update users.")
+    
+    await admin_rate_limiter.check(f"update_user:{_request_client_key(request)}", runtime_settings.policy.admin_rate_limit_per_minute)
+    
+    updated_user = await admin_store.update_user(
+        username=username,
+        email=body.email,
+        role=body.role,
+        display_name=body.display_name,
+    )
+    
+    if not updated_user:
+        await admin_store.append_audit_log(
+            actor=user,
+            action="update_user",
+            target=username,
+            status="denied",
+            metadata={"error": "User not found", "client": _request_client_key(request)},
+        )
+        raise HTTPException(status_code=404, detail="User not found")
+    
+    await admin_store.append_audit_log(
+        actor=user,
+        action="update_user",
+        target=username,
+        status="success",
+        metadata={
+            "email": body.email,
+            "role": body.role,
+            "display_name": body.display_name,
+            "client": _request_client_key(request),
+        },
+    )
+    
+    return admin_store._user_to_public(updated_user)
+
+
+@app.delete("/api/admin/users/{username}")
+async def delete_admin_user(
+    username: str,
+    request: Request,
+    user: AdminUserOut = Depends(_get_admin_user),
+) -> dict[str, str]:
+    """Delete an admin user (only owner can do this)"""
+    if user.role != "owner":
+        raise HTTPException(status_code=403, detail="Insufficient permissions. Only owner can delete users.")
+    
+    await admin_rate_limiter.check(f"delete_user:{_request_client_key(request)}", runtime_settings.policy.admin_rate_limit_per_minute)
+    
+    try:
+        success = await admin_store.delete_user(username)
+    except ValueError as e:
+        await admin_store.append_audit_log(
+            actor=user,
+            action="delete_user",
+            target=username,
+            status="denied",
+            metadata={"error": str(e), "client": _request_client_key(request)},
+        )
+        raise HTTPException(status_code=400, detail=str(e))
+    
+    if not success:
+        await admin_store.append_audit_log(
+            actor=user,
+            action="delete_user",
+            target=username,
+            status="denied",
+            metadata={"error": "User not found", "client": _request_client_key(request)},
+        )
+        raise HTTPException(status_code=404, detail="User not found")
+    
+    await admin_store.append_audit_log(
+        actor=user,
+        action="delete_user",
+        target=username,
+        status="success",
+        metadata={"client": _request_client_key(request)},
+    )
+    
+    return {"message": f"User '{username}' deleted successfully"}
 
 
 # ============================================================================

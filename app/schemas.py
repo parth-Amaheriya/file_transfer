@@ -33,6 +33,7 @@ class RuntimeSettings(BaseModel):
 
 class AdminStoredUser(BaseModel):
     username: str = Field(..., min_length=1, max_length=80)
+    email: Optional[str] = Field(None, description="User's email for password reset")
     role: AdminRole = "viewer"
     password_hash: str = Field(..., min_length=16)
     display_name: Optional[str] = Field(None, max_length=120)
@@ -42,13 +43,14 @@ class AdminStoredUser(BaseModel):
 
 class AdminUserOut(BaseModel):
     username: str
+    email: Optional[str] = None
     role: AdminRole
     display_name: Optional[str] = None
     last_login_at: Optional[datetime] = None
 
 
 class AdminLoginRequest(BaseModel):
-    username: str = Field(..., min_length=1, max_length=80)
+    email: str = Field(..., min_length=1, max_length=256)
     password: str = Field(..., min_length=1, max_length=200)
 
 
@@ -145,3 +147,45 @@ class SignalingMessage(BaseModel):
     data: dict[str, Any]  # SDP or ICE candidate data
     sender_device_id: str
     target_device_id: str
+
+
+# ============================================================================
+# Forgot Password Schemas
+# ============================================================================
+
+
+class AdminForgotPasswordRequest(BaseModel):
+    username: Optional[str] = Field(None, description="Username for password reset (owner only)")
+    email: Optional[str] = Field(None, description="Email for password reset (any user)")
+
+
+class AdminForgotPasswordVerifyRequest(BaseModel):
+    username: Optional[str] = Field(None, description="Username for password reset")
+    email: Optional[str] = Field(None, description="Email for password reset")
+    otp: str = Field(..., min_length=6, max_length=6)
+
+
+class AdminResetPasswordRequest(BaseModel):
+    username: Optional[str] = Field(None, description="Username for password reset")
+    email: Optional[str] = Field(None, description="Email for password reset")
+    otp: str = Field(..., min_length=6, max_length=6)
+    new_password: str = Field(..., min_length=1, max_length=200)
+
+
+# ============================================================================
+# Admin User Management Schemas
+# ============================================================================
+
+
+class AdminUserCreate(BaseModel):
+    username: str = Field(..., min_length=1, max_length=80)
+    email: str = Field(..., min_length=1, max_length=256)
+    password: str = Field(..., min_length=1, max_length=200)
+    role: AdminRole = "viewer"
+    display_name: Optional[str] = Field(None, max_length=120)
+
+
+class AdminUserUpdate(BaseModel):
+    email: Optional[str] = Field(None, min_length=1, max_length=256)
+    role: Optional[AdminRole] = None
+    display_name: Optional[str] = Field(None, max_length=120)

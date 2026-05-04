@@ -4,7 +4,9 @@ import asyncio
 import base64
 import hashlib
 import hmac
+import json
 import logging
+import re
 import secrets
 from datetime import datetime, timedelta
 from typing import Any, Optional
@@ -46,6 +48,7 @@ class AdminStore:
         self._mongo_enabled = False
         self._mongo_client: Any = None
         self._db: Any = None
+        self._otp_store: dict[str, dict[str, Any]] = {}
 
         if settings.mongo_url and AsyncIOMotorClient is not None:
             try:
@@ -93,29 +96,80 @@ class AdminStore:
         return [
             AdminStoredUser(
                 username=settings.admin_owner_username,
+                email=settings.admin_owner_email,
                 role="owner",
                 password_hash=AdminStore._hash_password(settings.admin_owner_password),
                 display_name="Owner",
             ),
-            AdminStoredUser(
-                username=settings.admin_admin_username,
-                role="admin",
-                password_hash=AdminStore._hash_password(settings.admin_admin_password),
-                display_name="Administrator",
-            ),
-            AdminStoredUser(
-                username=settings.admin_operator_username,
-                role="operator",
-                password_hash=AdminStore._hash_password(settings.admin_operator_password),
-                display_name="Operator",
-            ),
-            AdminStoredUser(
-                username=settings.admin_viewer_username,
-                role="viewer",
-                password_hash=AdminStore._hash_password(settings.admin_viewer_password),
-                display_name="Viewer",
-            ),
         ]
+
+    @staticmethod
+    def _normalize_email(email: str) -> str:
+        return email.strip().lower()
+
+    async def _admin_notification_recipients(self) -> list[str]:
+        recipients: dict[str, str] = {}
+
+        for user in await self.list_users():
+            if user.email and self._role_rank(user.role) >= self._role_rank("operator"):
+                normalized_email = self._normalize_email(user.email)
+                if normalized_email:
+                    recipients[normalized_email] = normalized_email
+
+        return list(recipients.values())
+
+    @staticmethod
+    def _send_email_message_sync(message: Any, smtp_kwargs: dict[str, Any]) -> None:
+        import smtplib
+        import ssl
+
+        timeout = smtp_kwargs.get("timeout", 20)
+        hostname = smtp_kwargs["hostname"]
+        port = smtp_kwargs["port"]
+        use_tls = smtp_kwargs["use_tls"]
+        start_tls = smtp_kwargs["start_tls"]
+        username = smtp_kwargs.get("username")
+        password = smtp_kwargs.get("password")
+
+        if use_tls:
+            with smtplib.SMTP_SSL(hostname, port, timeout=timeout, context=ssl.create_default_context()) as server:
+                if username:
+                    server.login(username, password or "")
+                server.send_message(message)
+            return
+
+        with smtplib.SMTP(hostname, port, timeout=timeout) as server:
+            server.ehlo()
+            if start_tls:
+                server.starttls(context=ssl.create_default_context())
+                server.ehlo()
+            if username:
+                server.login(username, password or "")
+            server.send_message(message)
+
+    async def _send_email_message(self, message: Any) -> None:
+        if not self.settings.smtp_host:
+            raise RuntimeError("SMTP is not configured")
+
+        smtp_kwargs = {
+            "hostname": self.settings.smtp_host,
+            "port": self.settings.smtp_port,
+            "use_tls": self.settings.smtp_port == 465,
+            "start_tls": self.settings.smtp_port == 587,
+        }
+        if self.settings.smtp_user:
+            smtp_kwargs["username"] = self.settings.smtp_user
+            smtp_kwargs["password"] = self.settings.smtp_password
+
+        try:
+            import aiosmtplib
+
+            await aiosmtplib.send(message, **smtp_kwargs)
+            return
+        except Exception as error:
+            logger.warning("Async SMTP send failed, falling back to smtplib: %s", error, exc_info=True)
+
+        await asyncio.to_thread(self._send_email_message_sync, message, smtp_kwargs)
 
     async def initialize(self) -> None:
         async with self._lock:
@@ -156,6 +210,7 @@ class AdminStore:
     def _user_to_public(self, user: AdminStoredUser) -> AdminUserOut:
         return AdminUserOut(
             username=user.username,
+            email=user.email,
             role=user.role,
             display_name=user.display_name,
             last_login_at=user.last_login_at,
@@ -211,8 +266,25 @@ class AdminStore:
 
         return self._memory_users.get(username)
 
+    async def get_user_by_email(self, email: str) -> Optional[AdminStoredUser]:
+        normalized_email = self._normalize_email(email)
+
+        if self._mongo_enabled and self._db is not None:
+            document = await self._db.admin_users.find_one(
+                {"email": {"$regex": f"^{re.escape(normalized_email)}$", "$options": "i"}}
+            )
+            if not document:
+                return None
+            return AdminStoredUser.model_validate(document)
+
+        for user in self._memory_users.values():
+            if user.email and self._normalize_email(user.email) == normalized_email:
+                return user
+
+        return None
+
     async def authenticate(self, login: AdminLoginRequest) -> tuple[str, AdminUserOut, datetime]:
-        user = await self.get_user(login.username)
+        user = await self.get_user_by_email(login.email)
         if not user or not self._verify_password(login.password, user.password_hash):
             raise ValueError("Invalid admin credentials")
 
@@ -300,6 +372,64 @@ class AdminStore:
             raise PermissionError("Insufficient admin role")
         return user
 
+    async def _send_admin_notification(self, entry: AuditLogEntry) -> None:
+        """Send a security notification for a mutating admin action."""
+        logger.info(f"Starting to send admin notification for action: {entry.action}")
+        recipients = await self._admin_notification_recipients()
+        logger.info(
+            "SMTP Config - host: %s, port: %s, user: %s, recipients: %s",
+            self.settings.smtp_host,
+            self.settings.smtp_port,
+            self.settings.smtp_user,
+            recipients,
+        )
+        if not self.settings.smtp_host or not recipients:
+            logger.debug("Skipping admin notification email: SMTP host or recipients not configured")
+            return
+
+        try:
+            from email.message import EmailMessage
+
+            action_title = entry.action.replace("_", " ").title()
+            timestamp_str = entry.timestamp.strftime("%Y-%m-%d %H:%M:%S UTC")
+
+            text_body = (
+                f"Nexdrop Administrative Update\n"
+                f"============================\n"
+                f"Action:    {action_title}\n"
+                f"Actor:     {entry.actor} ({entry.role})\n"
+                f"Target:    {entry.target or 'N/A'}\n"
+                f"Status:    {entry.status.upper()}\n"
+                f"Timestamp: {timestamp_str}\n"
+            )
+            if entry.before or entry.after:
+                text_body += "\nSettings Change:\n"
+                if entry.before:
+                    text_body += f"BEFORE:\n{json.dumps(entry.before, indent=2, default=str)}\n"
+                if entry.after:
+                    text_body += f"AFTER:\n{json.dumps(entry.after, indent=2, default=str)}\n"
+            if entry.metadata:
+                text_body += f"\nMetadata:\n{json.dumps(entry.metadata, indent=2)}\n"
+
+            msg = EmailMessage()
+            msg["Subject"] = f"Nexdrop Security Alert: {action_title.upper()}"
+            msg["From"] = self.settings.smtp_from
+            msg["To"] = ", ".join(recipients)
+            msg.set_content(text_body)
+
+            logger.info("Sending admin notification email to %s", recipients)
+            await self._send_email_message(msg)
+            logger.info("Admin notification email sent successfully for action: %s", entry.action)
+        except Exception as error:
+            logger.error("Failed to send admin notification email: %s", error, exc_info=True)
+
+    def _handle_email_task_result(self, task: asyncio.Task, entry: AuditLogEntry) -> None:
+        """Callback to handle task results and log exceptions"""
+        try:
+            task.result()  # This will raise if there was an exception
+        except Exception as e:
+            logger.error(f"Email task failed for action {entry.action}: {e}", exc_info=True)
+
     async def append_audit_log(
         self,
         *,
@@ -329,6 +459,21 @@ class AdminStore:
         else:
             self._memory_audit_log.append(entry)
             self._memory_audit_log = self._memory_audit_log[-200:]
+
+        # Send notification for admin panel changes and destructive actions
+        notification_actions = {
+            "update_settings",
+            "disconnect_session",
+            "disconnect_device",
+            "create_user",
+            "update_user",
+            "delete_user",
+        }
+        if status == "success" and action in notification_actions:
+            logger.info(f"Scheduling admin notification email for action: {action}")
+            task = asyncio.create_task(self._send_admin_notification(entry))
+            # Add callback to log any exceptions
+            task.add_done_callback(lambda t: self._handle_email_task_result(t, entry))
 
         return entry
 
@@ -364,6 +509,187 @@ class AdminStore:
             cursor = self._db.admin_users.find({})
             return [AdminStoredUser.model_validate(document) for document in await cursor.to_list(length=100)]
         return list(self._memory_users.values())
+
+    async def generate_otp(self, username: str) -> str:
+        """Generate a 6-digit OTP and store it with expiration"""
+        import secrets
+        from datetime import timedelta
+
+        otp = "".join(secrets.choice("0123456789") for _ in range(6))
+        expires_at = self._now() + timedelta(minutes=10)  # OTP valid for 10 minutes
+
+        async with self._lock:
+            self._otp_store[username] = {
+                "otp": otp,
+                "expires_at": expires_at,
+                "attempts": 0,
+            }
+
+        logger.info(f"Generated OTP for user {username}: {otp} (expires in 10 minutes)")
+        return otp
+
+    async def verify_otp(self, username: str, otp: str, *, consume: bool = True) -> bool:
+        """Verify the OTP for a user."""
+        async with self._lock:
+            stored = self._otp_store.get(username)
+            if not stored:
+                logger.warning(f"OTP not found for user {username}")
+                return False
+
+            if stored["expires_at"] < self._now():
+                del self._otp_store[username]
+                logger.warning(f"OTP expired for user {username}")
+                return False
+
+            if stored["attempts"] >= 3:
+                del self._otp_store[username]
+                logger.warning(f"Too many attempts for user {username}")
+                return False
+
+            if stored["otp"] != otp:
+                stored["attempts"] += 1
+                logger.warning(f"Invalid OTP for user {username}, attempt {stored['attempts']}/3")
+                return False
+
+            if consume:
+                del self._otp_store[username]
+            logger.info(f"OTP verified successfully for user {username}")
+            return True
+
+    async def send_forgot_password_email(self, username: str, otp: str) -> None:
+        """Send forgot password email with OTP to user's personal email"""
+        user = await self.get_user(username)
+        if not user or not user.email:
+            logger.warning(f"No email found for user {username}, cannot send OTP")
+            return
+
+        try:
+            from email.message import EmailMessage
+
+            msg = EmailMessage()
+            msg["Subject"] = "Nexdrop - Password Reset OTP"
+            msg["From"] = self.settings.smtp_from
+            msg["To"] = user.email
+
+            text_body = (
+                "Nexdrop Password Reset\n"
+                "======================\n\n"
+                f"Username: {username}\n\n"
+                f"Your OTP for password reset is: {otp}\n\n"
+                "This OTP is valid for 10 minutes.\n\n"
+                "If you did not request this, please ignore this email.\n"
+            )
+
+            msg.set_content(text_body)
+
+            logger.info(f"Sending forgot password email to {msg['To']} for user {username}")
+            await self._send_email_message(msg)
+            logger.info("Forgot password email sent successfully")
+        except Exception as e:
+            logger.error("Failed to send forgot password email: %s", e, exc_info=True)
+
+    async def reset_password(self, username: str, new_password: str) -> bool:
+        """Reset password for a user"""
+        user = await self.get_user(username)
+        if not user:
+            return False
+
+        new_hash = self._hash_password(new_password)
+
+        if self._mongo_enabled and self._db is not None:
+            await self._db.admin_users.update_one(
+                {"username": username},
+                {"$set": {"password_hash": new_hash}},
+            )
+        else:
+            self._memory_users[username].password_hash = new_hash
+
+        logger.info(f"Password reset for user {username}")
+        return True
+
+    async def create_user(
+        self,
+        username: str,
+        email: str,
+        password: str,
+        role: str = "viewer",
+        display_name: Optional[str] = None,
+    ) -> AdminStoredUser:
+        """Create a new admin user (only owner can do this)"""
+        # Check if user already exists
+        existing = await self.get_user(username)
+        if existing:
+            raise ValueError(f"User '{username}' already exists")
+
+        normalized_email = self._normalize_email(email)
+        
+        password_hash = self._hash_password(password)
+        
+        new_user = AdminStoredUser(
+            username=username,
+            email=normalized_email,
+            role=role,
+            password_hash=password_hash,
+            display_name=display_name,
+        )
+        
+        if self._mongo_enabled and self._db is not None:
+            await self._db.admin_users.insert_one(new_user.model_dump(mode="python"))
+        else:
+            self._memory_users[username] = new_user
+        
+        logger.info(f"User created: {username} (email: {normalized_email}, role: {role})")
+        return new_user
+
+    async def update_user(
+        self,
+        username: str,
+        email: Optional[str] = None,
+        role: Optional[str] = None,
+        display_name: Optional[str] = None,
+    ) -> Optional[AdminStoredUser]:
+        """Update an existing user"""
+        user = await self.get_user(username)
+        if not user:
+            return None
+        
+        update_data = {}
+        if email is not None:
+            update_data["email"] = self._normalize_email(email)
+        if role is not None:
+            update_data["role"] = role
+        if display_name is not None:
+            update_data["display_name"] = display_name
+        
+        if self._mongo_enabled and self._db is not None:
+            await self._db.admin_users.update_one(
+                {"username": username},
+                {"$set": update_data},
+            )
+            return await self.get_user(username)
+        else:
+            if email:
+                user.email = self._normalize_email(email)
+            if role:
+                user.role = role
+            if display_name:
+                user.display_name = display_name
+            self._memory_users[username] = user
+            return user
+
+    async def delete_user(self, username: str) -> bool:
+        """Delete an admin user"""
+        if username == self.settings.admin_owner_username:
+            raise ValueError("Cannot delete the owner user")
+        
+        if self._mongo_enabled and self._db is not None:
+            result = await self._db.admin_users.delete_one({"username": username})
+            return result.deleted_count > 0
+        else:
+            if username in self._memory_users:
+                del self._memory_users[username]
+                return True
+            return False
 
 
 __all__ = ["AdminStore", "ROLE_ORDER"]
