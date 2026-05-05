@@ -107,6 +107,17 @@ class AdminStore:
     def _normalize_email(email: str) -> str:
         return email.strip().lower()
 
+    @staticmethod
+    def _is_smtp_network_error(error: BaseException) -> bool:
+        current_error: BaseException | None = error
+
+        while current_error is not None:
+            if isinstance(current_error, OSError) and getattr(current_error, "errno", None) in {101, 111, 113, 10051, 10060}:
+                return True
+            current_error = current_error.__cause__ or current_error.__context__
+
+        return False
+
     async def _admin_notification_recipients(self) -> list[str]:
         recipients: dict[str, str] = {}
 
@@ -160,6 +171,7 @@ class AdminStore:
         if self.settings.smtp_user:
             smtp_kwargs["username"] = self.settings.smtp_user
             smtp_kwargs["password"] = self.settings.smtp_password
+            print(f"DEBUG: SMTP credentials provided, user: {self.settings.smtp_user}")
 
         try:
             import aiosmtplib
@@ -167,7 +179,10 @@ class AdminStore:
             await aiosmtplib.send(message, **smtp_kwargs)
             return
         except Exception as error:
-            logger.warning("Async SMTP send failed, falling back to smtplib: %s", error, exc_info=True)
+            if self._is_smtp_network_error(error):
+                logger.debug("Async SMTP send failed due to connectivity issue, falling back to smtplib: %s", error)
+            else:
+                logger.warning("Async SMTP send failed, falling back to smtplib: %s", error, exc_info=True)
 
         await asyncio.to_thread(self._send_email_message_sync, message, smtp_kwargs)
 
@@ -418,7 +433,13 @@ class AdminStore:
             msg.set_content(text_body)
 
             logger.info("Sending admin notification email to %s", recipients)
-            await self._send_email_message(msg)
+            try:
+                await self._send_email_message(msg)
+            except Exception as error:
+                if self._is_smtp_network_error(error):
+                    logger.warning("Skipping admin notification email for action %s: SMTP is unreachable (%s)", entry.action, error)
+                    return
+                raise
             logger.info("Admin notification email sent successfully for action: %s", entry.action)
         except Exception as error:
             logger.error("Failed to send admin notification email: %s", error, exc_info=True)
@@ -583,7 +604,13 @@ class AdminStore:
             msg.set_content(text_body)
 
             logger.info(f"Sending forgot password email to {msg['To']} for user {username}")
-            await self._send_email_message(msg)
+            try:
+                await self._send_email_message(msg)
+            except Exception as error:
+                if self._is_smtp_network_error(error):
+                    logger.warning("Skipping forgot password email for user %s: SMTP is unreachable (%s)", username, error)
+                    return
+                raise
             logger.info("Forgot password email sent successfully")
         except Exception as e:
             logger.error("Failed to send forgot password email: %s", e, exc_info=True)
