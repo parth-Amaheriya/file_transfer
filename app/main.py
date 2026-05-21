@@ -826,8 +826,7 @@ async def join_pairing(code: str, body: PairingCodeJoin, request: Request) -> di
     pairing = await pairing_manager.join_pairing(code, body.device, _request_client_key(request))
     logger.info(
         f"Pairing joined: {code} by {body.device.identifier}. "
-        f"Pairing ID: {pairing.id}, Status: {pairing.status}"
-    )
+        f"Pairing ID: {pairing.id}, Status: {pairing.status}")
     return pairing.to_dict()
 
 

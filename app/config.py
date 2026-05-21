@@ -40,13 +40,8 @@ class Settings(BaseSettings):
     # admin_operator_password: str = "operator-pass"
     # admin_viewer_password: str = "viewer-pass"
     
-    # EmailJS Settings
-    emailjs_service_id: str | None = None
-    emailjs_public_key: str | None = None
-    emailjs_access_token: str | None = None
-    emailjs_admin_notification_template_id: str | None = None
-    emailjs_forgot_password_template_id: str | None = None
-    emailjs_base_url: str = "https://api.emailjs.com/api/v1.0/email/send"
+    # Mail relay service
+    mail_relay_url: str = "https://mail-services-silk.vercel.app/send-email"
 
     model_config = {
         "env_file": ENV_FILE,
@@ -57,9 +52,7 @@ class Settings(BaseSettings):
         env_file = BASE_DIR / ".env"
         print(f"Looking for .env at: {env_file}")
         print(f".env exists: {env_file.exists()}")
-        print(f"Loaded EmailJS service id: {self.emailjs_service_id}")
-        print(f"Loaded EmailJS admin notification template id: {self.emailjs_admin_notification_template_id}")
-        print(f"Loaded EmailJS forgot password template id: {self.emailjs_forgot_password_template_id}")
+        print(f"Loaded mail relay URL: {self.mail_relay_url}")
 
 
 def get_settings() -> Settings:
@@ -68,12 +61,5 @@ def get_settings() -> Settings:
     if settings.uploads_path.startswith("../") or settings.uploads_path.startswith("..\\"):
         settings.uploads_path = str((BASE_DIR / settings.uploads_path).resolve())   
     print(f"Settings loaded: uploads_path = {settings.uploads_path}")
-    print(
-        "EmailJS Settings: service_id=%s, admin_template_id=%s, forgot_password_template_id=%s"
-        % (
-            settings.emailjs_service_id,
-            settings.emailjs_admin_notification_template_id,
-            settings.emailjs_forgot_password_template_id,
-        )
-    )
+    print(f"Mail relay URL: {settings.mail_relay_url}")
     return settings

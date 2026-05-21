@@ -38,22 +38,17 @@ Open `http://localhost:8000` to access the pairing dashboard.
 | `PAIRING_CODE_TTL` | Pairing code timeout in seconds | `3600` (1 hour) |
 | `MAX_CONNECTIONS` | Max concurrent pairings allowed | `100` |
 | `FRONTEND_URL` | Public frontend URL used in generated QR links | browser origin or backend URL fallback |
-| `EMAILJS_SERVICE_ID` | EmailJS service identifier | required for email delivery |
-| `EMAILJS_PUBLIC_KEY` | EmailJS public key | required for email delivery |
-| `EMAILJS_ACCESS_TOKEN` | EmailJS private key / access token | optional |
-| `EMAILJS_ADMIN_NOTIFICATION_TEMPLATE_ID` | Template used for admin audit notifications | required for admin alerts |
-| `EMAILJS_FORGOT_PASSWORD_TEMPLATE_ID` | Template used for password reset OTP emails | required for password reset |
-| `EMAILJS_BASE_URL` | EmailJS send endpoint | `https://api.emailjs.com/api/v1.0/email/send` |
+| `MAIL_RELAY_URL` | Vercel mail relay endpoint | `https://mail-services-silk.vercel.app/send-email` |
 
 **Note**: No MongoDB configuration needed!
 
-Email delivery now uses EmailJS instead of SMTP, which works well for Render deployments without outbound SMTP support.
+Email delivery now uses a separate Vercel mail relay service instead of SMTP directly from this backend.
 
-## EmailJS Templates
+## Mail Relay Templates
 
 ### Admin Notification Template
 
-Use this HTML in your EmailJS admin notification template.
+Use this HTML in your mail relay admin notification template.
 
 ```html
 <div style="margin:0;padding:0;background:#f5f7fb;font-family:system-ui,-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Arial,sans-serif;color:#1f2937;">
@@ -116,7 +111,7 @@ Template variables expected from the backend:
 
 ### Forgot Password Template
 
-Use this HTML in your EmailJS password reset template.
+Use this HTML in your mail relay password reset template.
 
 ```html
 <div style="margin:0;padding:0;background:#f5f7fb;font-family:system-ui,-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Arial,sans-serif;color:#1f2937;">

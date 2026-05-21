@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import html
 import urllib.error
 import urllib.request
 import hashlib
@@ -122,6 +123,11 @@ class AdminStore:
 
         return False
 
+    @staticmethod
+    def _plain_text_to_html(text: str) -> str:
+        escaped = html.escape(text).replace("\n", "<br />")
+        return f"<div style=\"font-family:system-ui,-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Arial,sans-serif;font-size:14px;line-height:1.7;color:#111827;white-space:normal;\">{escaped}</div>"
+
     async def _admin_notification_recipients(self) -> list[str]:
         recipients: dict[str, str] = {}
 
@@ -133,22 +139,13 @@ class AdminStore:
 
         return list(recipients.values())
 
-    async def _send_emailjs_message(self, *, template_id: str, template_params: dict[str, Any]) -> None:
-        if not self.settings.emailjs_service_id or not self.settings.emailjs_public_key:
-            raise RuntimeError("EmailJS is not configured")
-
-        payload = {
-            "service_id": self.settings.emailjs_service_id,
-            "template_id": template_id,
-            "user_id": self.settings.emailjs_public_key,
-            "template_params": template_params,
-        }
-        if self.settings.emailjs_access_token:
-            payload["accessToken"] = self.settings.emailjs_access_token
+    async def _send_mail_relay_message(self, payload: dict[str, Any]) -> None:
+        if not self.settings.mail_relay_url:
+            raise RuntimeError("Mail relay is not configured")
 
         def send_sync() -> dict[str, Any]:
             request = urllib.request.Request(
-                self.settings.emailjs_base_url,
+                self.settings.mail_relay_url,
                 data=json.dumps(payload).encode("utf-8"),
                 headers={"Content-Type": "application/json"},
                 method="POST",
@@ -167,9 +164,9 @@ class AdminStore:
             await asyncio.to_thread(send_sync)
         except Exception as error:
             if self._is_email_delivery_network_error(error):
-                logger.warning("EmailJS delivery failed due to connectivity issue: %s", error)
+                logger.warning("Mail relay delivery failed due to connectivity issue: %s", error)
             else:
-                logger.warning("EmailJS delivery failed: %s", error, exc_info=True)
+                logger.warning("Mail relay delivery failed: %s", error, exc_info=True)
             raise
 
     async def initialize(self) -> None:
@@ -378,13 +375,12 @@ class AdminStore:
         logger.info(f"Starting to send admin notification for action: {entry.action}")
         recipients = await self._admin_notification_recipients()
         logger.info(
-            "EmailJS Config - service_id: %s, admin_template_id: %s, recipients: %s",
-            self.settings.emailjs_service_id,
-            self.settings.emailjs_admin_notification_template_id,
+            "Mail relay config - url: %s, recipients: %s",
+            self.settings.mail_relay_url,
             recipients,
         )
-        if not self.settings.emailjs_service_id or not self.settings.emailjs_public_key or not self.settings.emailjs_admin_notification_template_id or not recipients:
-            logger.debug("Skipping admin notification email: EmailJS or recipients not configured")
+        if not self.settings.mail_relay_url or not recipients:
+            logger.debug("Skipping admin notification email: mail relay or recipients not configured")
             return
 
         try:
@@ -409,21 +405,29 @@ class AdminStore:
             if entry.metadata:
                 text_body += f"\nMetadata:\n{json.dumps(entry.metadata, indent=2)}\n"
 
+            html_body = (
+                "<div style=\"font-family:system-ui,-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Arial,sans-serif;line-height:1.7;color:#111827;\">"
+                f"<h2 style=\"margin:0 0 12px;font-size:20px;\">Nexdrop Security Alert: {html.escape(action_title.upper())}</h2>"
+                f"<p style=\"margin:0 0 12px;color:#4b5563;\">Timestamp: {html.escape(timestamp_str)}</p>"
+                f"<table cellpadding=\"0\" cellspacing=\"0\" style=\"border-collapse:collapse;width:100%;max-width:640px;\">"
+                f"<tr><td style=\"padding:8px 0;color:#6b7280;width:140px;\">Action</td><td style=\"padding:8px 0;font-weight:600;\">{html.escape(action_title)}</td></tr>"
+                f"<tr><td style=\"padding:8px 0;color:#6b7280;\">Actor</td><td style=\"padding:8px 0;\">{html.escape(entry.actor)} ({html.escape(entry.role)})</td></tr>"
+                f"<tr><td style=\"padding:8px 0;color:#6b7280;\">Target</td><td style=\"padding:8px 0;\">{html.escape(entry.target or 'N/A')}</td></tr>"
+                f"<tr><td style=\"padding:8px 0;color:#6b7280;\">Status</td><td style=\"padding:8px 0;\">{html.escape(entry.status.upper())}</td></tr>"
+                f"</table>"
+                f"<pre style=\"margin-top:16px;padding:16px;background:#f9fafb;border:1px solid #e5e7eb;border-radius:12px;white-space:pre-wrap;\">{html.escape(text_body)}</pre>"
+                "</div>"
+            )
+
             logger.info("Sending admin notification email to %s", recipients)
-            await self._send_emailjs_message(
-                template_id=self.settings.emailjs_admin_notification_template_id,
-                template_params={
-                    "to_email": ", ".join(recipients),
+            await self._send_mail_relay_message(
+                {
+                    "to_email": recipients,
                     "subject": f"Nexdrop Security Alert: {action_title.upper()}",
-                    "action": action_title,
-                    "actor": entry.actor,
-                    "role": entry.role,
-                    "target": entry.target or "N/A",
-                    "status": entry.status.upper(),
-                    "timestamp": timestamp_str,
-                    "message": text_body,
-                    "recipient_count": len(recipients),
-                },
+                    "text": text_body,
+                    "html": html_body,
+                    "from_email": self.settings.admin_owner_email,
+                }
             )
             logger.info("Admin notification email sent successfully for action: %s", entry.action)
         except Exception as error:
@@ -579,25 +583,35 @@ class AdminStore:
                 "If you did not request this, please ignore this email.\n"
             )
 
-            if not self.settings.emailjs_service_id or not self.settings.emailjs_public_key or not self.settings.emailjs_forgot_password_template_id:
-                logger.debug("Skipping forgot password email: EmailJS is not configured")
+            if not self.settings.mail_relay_url:
+                logger.debug("Skipping forgot password email: mail relay is not configured")
                 return
 
             logger.info(f"Sending forgot password email to {user.email} for user {username}")
             try:
-                await self._send_emailjs_message(
-                    template_id=self.settings.emailjs_forgot_password_template_id,
-                    template_params={
+                html_body = (
+                    "<div style=\"font-family:system-ui,-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Arial,sans-serif;line-height:1.7;color:#111827;\">"
+                    "<h2 style=\"margin:0 0 12px;font-size:20px;\">Nexdrop Password Reset</h2>"
+                    f"<p style=\"margin:0 0 16px;color:#4b5563;\">Hello {html.escape(username)}, use the verification code below to reset your password.</p>"
+                    "<div style=\"text-align:center;padding:20px 16px;background:#f9fafb;border:1px solid #e5e7eb;border-radius:12px;\">"
+                    "<div style=\"font-size:12px;font-weight:700;letter-spacing:.08em;text-transform:uppercase;color:#6b7280;margin-bottom:10px;\">One-time code</div>"
+                    f"<div style=\"font-size:32px;font-weight:800;letter-spacing:0.2em;color:#111827;\">{html.escape(otp)}</div>"
+                    "</div>"
+                    f"<pre style=\"margin-top:16px;padding:16px;background:#f9fafb;border:1px solid #e5e7eb;border-radius:12px;white-space:pre-wrap;\">{html.escape(text_body)}</pre>"
+                    "</div>"
+                )
+                await self._send_mail_relay_message(
+                    {
                         "to_email": user.email,
                         "subject": "Nexdrop - Password Reset OTP",
-                        "username": username,
-                        "otp": otp,
-                        "message": text_body,
-                    },
+                        "text": text_body,
+                        "html": html_body,
+                        "from_email": self.settings.admin_owner_email,
+                    }
                 )
             except Exception as error:
                 if self._is_email_delivery_network_error(error):
-                    logger.warning("Skipping forgot password email for user %s: EmailJS is unreachable (%s)", username, error)
+                    logger.warning("Skipping forgot password email for user %s: mail relay is unreachable (%s)", username, error)
                     return
                 raise
             logger.info("Forgot password email sent successfully")
