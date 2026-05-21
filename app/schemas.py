@@ -143,7 +143,7 @@ class TextMessage(BaseModel):
 
 
 class SignalingMessage(BaseModel):
-    type: Literal["offer", "answer", "ice_candidate"]
+    type: Literal["offer", "answer", "ice_candidate", "ice_restart_request"]
     data: dict[str, Any]  # SDP or ICE candidate data
     sender_device_id: str
     target_device_id: str
