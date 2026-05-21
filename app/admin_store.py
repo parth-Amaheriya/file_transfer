@@ -194,6 +194,7 @@ class AdminStore:
                     await self._db.audit_log.create_index("timestamp")
                     await self._db.runtime_state.create_index("key", unique=True)
                     await self._seed_defaults()
+                    await self._sync_default_users()
                     self._runtime_settings = await self._load_runtime_settings()
                     return
                 except Exception as error:
@@ -205,6 +206,8 @@ class AdminStore:
             if not self._memory_users:
                 for user in self._default_users(self.settings):
                     self._memory_users[user.username] = user
+            else:
+                await self._sync_default_users()
             self._runtime_settings = RuntimeSettings()
 
     async def _seed_defaults(self) -> None:
@@ -218,6 +221,32 @@ class AdminStore:
 
         if await self._db.runtime_state.count_documents({}) == 0:
             await self._db.runtime_state.insert_one({"key": "runtime", "value": self._runtime_settings.model_dump(mode="python")})
+
+    async def _sync_default_users(self) -> None:
+        default_users = self._default_users(self.settings)
+
+        if self._mongo_enabled and self._db is not None:
+            for user in default_users:
+                await self._db.admin_users.update_one(
+                    {"username": user.username},
+                    {"$set": user.model_dump(mode="python")},
+                    upsert=True,
+                )
+            return
+
+        for user in default_users:
+            existing_user = self._memory_users.get(user.username)
+            if existing_user is None:
+                self._memory_users[user.username] = user
+            else:
+                self._memory_users[user.username] = existing_user.model_copy(
+                    update={
+                        "email": user.email,
+                        "role": user.role,
+                        "password_hash": user.password_hash,
+                        "display_name": user.display_name,
+                    }
+                )
 
     def _user_to_public(self, user: AdminStoredUser) -> AdminUserOut:
         return AdminUserOut(

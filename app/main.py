@@ -111,7 +111,7 @@ PAIRING_CODE_LENGTH = 6
 
 def _build_pairing_join_url(request: Request, code: str) -> str:
     base_url = (settings.frontend_url or request.headers.get("origin") or str(request.base_url)).rstrip("/")
-    return f"{base_url}/session?joinCode={quote(code)}"
+    return f"{base_url}/{quote(code)}"
 
 
 admin_store = AdminStore(settings)
@@ -313,14 +313,25 @@ class PairingManager:
             pairing = self.codes.get(normalized_code)
 
             if not pairing:
-                raise HTTPException(status_code=404, detail="Pairing code not found")
+                pairing = PairingCode(normalized_code, device, runtime_settings.policy.pairing_ttl_seconds)
+                self.pairings[pairing.id] = pairing
+                self.codes[normalized_code] = pairing
+                self._save_pairings()
+                return pairing
 
             if pairing.status == "terminated":
                 raise HTTPException(status_code=410, detail="Pairing has been terminated")
 
             if pairing.is_expired():
                 self.pause_pairing(pairing.id)
-                raise HTTPException(status_code=410, detail="Pairing code expired")
+                pairing = PairingCode(normalized_code, device, runtime_settings.policy.pairing_ttl_seconds)
+                self.pairings[pairing.id] = pairing
+                self.codes[normalized_code] = pairing
+                self._save_pairings()
+                return pairing
+
+            if pairing.initiator.identifier == device.identifier:
+                return pairing
 
             existing_peer = next((peer for peer in pairing.peers if peer.identifier == device.identifier), None)
             if existing_peer is None and pairing.device_count >= runtime_settings.policy.max_devices_per_session:
