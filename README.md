@@ -38,7 +38,7 @@ Open `http://localhost:8000` to access the pairing dashboard.
 | `PAIRING_CODE_TTL` | Pairing code timeout in seconds | `3600` (1 hour) |
 | `MAX_CONNECTIONS` | Max concurrent pairings allowed | `100` |
 | `FRONTEND_URL` | Public frontend URL used in generated QR links | browser origin or backend URL fallback |
-| `MAIL_RELAY_URL` | Vercel mail relay endpoint | `https://mail-services-silk.vercel.app/send-email` |
+| `MAIL_RELAY_URL` | Vercel mail relay endpoint | `https://mail-services-silk.vercel.app/` |
 
 **Note**: No MongoDB configuration needed!
 

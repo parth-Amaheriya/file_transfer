@@ -41,7 +41,7 @@ class Settings(BaseSettings):
     # admin_viewer_password: str = "viewer-pass"
     
     # Mail relay service
-    mail_relay_url: str = "https://mail-services-silk.vercel.app/send-email"
+    mail_relay_url: str = "https://mail-services-silk.vercel.app/"
 
     model_config = {
         "env_file": ENV_FILE,

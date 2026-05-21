@@ -4,6 +4,7 @@ import asyncio
 import base64
 import html
 import urllib.error
+import urllib.parse
 import urllib.request
 import hashlib
 import hmac
@@ -143,9 +144,22 @@ class AdminStore:
         if not self.settings.mail_relay_url:
             raise RuntimeError("Mail relay is not configured")
 
+        parsed_url = urllib.parse.urlparse(self.settings.mail_relay_url.strip())
+        normalized_path = parsed_url.path.rstrip("/")
+        if normalized_path.endswith("/send-email"):
+            relay_path = normalized_path
+        elif normalized_path in {"", "/"}:
+            relay_path = "/send-email"
+        else:
+            relay_path = f"{normalized_path}/send-email"
+
+        relay_url = urllib.parse.urlunparse(
+            parsed_url._replace(path=relay_path, params="", query="", fragment="")
+        )
+
         def send_sync() -> dict[str, Any]:
             request = urllib.request.Request(
-                self.settings.mail_relay_url,
+                relay_url,
                 data=json.dumps(payload).encode("utf-8"),
                 headers={"Content-Type": "application/json"},
                 method="POST",
@@ -164,9 +178,9 @@ class AdminStore:
             await asyncio.to_thread(send_sync)
         except Exception as error:
             if self._is_email_delivery_network_error(error):
-                logger.warning("Mail relay delivery failed due to connectivity issue: %s", error)
+                logger.warning("Mail relay delivery failed due to connectivity issue: %s (url=%s)", error, relay_url)
             else:
-                logger.warning("Mail relay delivery failed: %s", error, exc_info=True)
+                logger.warning("Mail relay delivery failed: %s (url=%s)", error, relay_url, exc_info=True)
             raise
 
     async def initialize(self) -> None:
