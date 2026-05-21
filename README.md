@@ -38,8 +38,119 @@ Open `http://localhost:8000` to access the pairing dashboard.
 | `PAIRING_CODE_TTL` | Pairing code timeout in seconds | `3600` (1 hour) |
 | `MAX_CONNECTIONS` | Max concurrent pairings allowed | `100` |
 | `FRONTEND_URL` | Public frontend URL used in generated QR links | browser origin or backend URL fallback |
+| `EMAILJS_SERVICE_ID` | EmailJS service identifier | required for email delivery |
+| `EMAILJS_PUBLIC_KEY` | EmailJS public key | required for email delivery |
+| `EMAILJS_ACCESS_TOKEN` | EmailJS private key / access token | optional |
+| `EMAILJS_ADMIN_NOTIFICATION_TEMPLATE_ID` | Template used for admin audit notifications | required for admin alerts |
+| `EMAILJS_FORGOT_PASSWORD_TEMPLATE_ID` | Template used for password reset OTP emails | required for password reset |
+| `EMAILJS_BASE_URL` | EmailJS send endpoint | `https://api.emailjs.com/api/v1.0/email/send` |
 
 **Note**: No MongoDB configuration needed!
+
+Email delivery now uses EmailJS instead of SMTP, which works well for Render deployments without outbound SMTP support.
+
+## EmailJS Templates
+
+### Admin Notification Template
+
+Use this HTML in your EmailJS admin notification template.
+
+```html
+<div style="margin:0;padding:0;background:#f5f7fb;font-family:system-ui,-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Arial,sans-serif;color:#1f2937;">
+  <div style="max-width:640px;margin:0 auto;padding:24px;">
+    <div style="background:#ffffff;border:1px solid #e5e7eb;border-radius:16px;overflow:hidden;box-shadow:0 10px 30px rgba(15,23,42,0.08);">
+      <div style="padding:24px 28px;background:linear-gradient(135deg,#0f172a,#1d4ed8);color:#ffffff;">
+        <div style="font-size:12px;letter-spacing:.12em;text-transform:uppercase;opacity:.8;">Nexdrop Admin Alert</div>
+        <div style="margin-top:8px;font-size:24px;font-weight:700;line-height:1.2;">{{subject}}</div>
+        <div style="margin-top:8px;font-size:14px;opacity:.85;">{{timestamp}}</div>
+      </div>
+
+      <div style="padding:28px;">
+        <div style="font-size:16px;line-height:1.6;margin-bottom:20px;">
+          A security-related admin action was recorded and sent to {{recipient_count}} recipient(s).
+        </div>
+
+        <table role="presentation" cellspacing="0" cellpadding="0" border="0" style="width:100%;border-collapse:collapse;">
+          <tr>
+            <td style="padding:12px 0;border-bottom:1px solid #e5e7eb;color:#6b7280;width:140px;vertical-align:top;">Action</td>
+            <td style="padding:12px 0;border-bottom:1px solid #e5e7eb;font-weight:600;vertical-align:top;">{{action}}</td>
+          </tr>
+          <tr>
+            <td style="padding:12px 0;border-bottom:1px solid #e5e7eb;color:#6b7280;vertical-align:top;">Actor</td>
+            <td style="padding:12px 0;border-bottom:1px solid #e5e7eb;vertical-align:top;">{{actor}} ({{role}})</td>
+          </tr>
+          <tr>
+            <td style="padding:12px 0;border-bottom:1px solid #e5e7eb;color:#6b7280;vertical-align:top;">Target</td>
+            <td style="padding:12px 0;border-bottom:1px solid #e5e7eb;vertical-align:top;">{{target}}</td>
+          </tr>
+          <tr>
+            <td style="padding:12px 0;color:#6b7280;vertical-align:top;">Status</td>
+            <td style="padding:12px 0;vertical-align:top;">
+              <span style="display:inline-block;padding:6px 10px;border-radius:999px;background:#eff6ff;color:#1d4ed8;font-size:12px;font-weight:700;letter-spacing:.04em;">{{status}}</span>
+            </td>
+          </tr>
+        </table>
+
+        <div style="margin-top:24px;padding:18px 20px;background:#f9fafb;border:1px solid #e5e7eb;border-radius:12px;">
+          <div style="font-size:12px;font-weight:700;letter-spacing:.08em;text-transform:uppercase;color:#6b7280;margin-bottom:10px;">Details</div>
+          <div style="white-space:pre-wrap;line-height:1.7;font-size:14px;color:#111827;">{{message}}</div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+```
+
+Template variables expected from the backend:
+
+- `to_email`
+- `subject`
+- `action`
+- `actor`
+- `role`
+- `target`
+- `status`
+- `timestamp`
+- `message`
+- `recipient_count`
+
+### Forgot Password Template
+
+Use this HTML in your EmailJS password reset template.
+
+```html
+<div style="margin:0;padding:0;background:#f5f7fb;font-family:system-ui,-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Arial,sans-serif;color:#1f2937;">
+  <div style="max-width:640px;margin:0 auto;padding:24px;">
+    <div style="background:#ffffff;border:1px solid #e5e7eb;border-radius:16px;overflow:hidden;box-shadow:0 10px 30px rgba(15,23,42,0.08);">
+      <div style="padding:24px 28px;background:linear-gradient(135deg,#111827,#dc2626);color:#ffffff;">
+        <div style="font-size:12px;letter-spacing:.12em;text-transform:uppercase;opacity:.8;">Nexdrop Password Reset</div>
+        <div style="margin-top:8px;font-size:24px;font-weight:700;line-height:1.2;">{{subject}}</div>
+      </div>
+
+      <div style="padding:28px;">
+        <div style="font-size:16px;line-height:1.6;margin-bottom:18px;">
+          Hello {{username}}, use the verification code below to reset your password.
+        </div>
+
+        <div style="text-align:center;padding:20px 16px;background:#f9fafb;border:1px solid #e5e7eb;border-radius:12px;">
+          <div style="font-size:12px;font-weight:700;letter-spacing:.08em;text-transform:uppercase;color:#6b7280;margin-bottom:10px;">One-time code</div>
+          <div style="font-size:32px;font-weight:800;letter-spacing:0.2em;color:#111827;">{{otp}}</div>
+        </div>
+
+        <div style="margin-top:20px;line-height:1.7;font-size:14px;color:#4b5563;white-space:pre-wrap;">{{message}}</div>
+      </div>
+    </div>
+  </div>
+</div>
+```
+
+Template variables expected from the backend:
+
+- `to_email`
+- `subject`
+- `username`
+- `otp`
+- `message`
 
 ## How It Works
 

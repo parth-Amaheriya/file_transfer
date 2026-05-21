@@ -40,13 +40,13 @@ class Settings(BaseSettings):
     # admin_operator_password: str = "operator-pass"
     # admin_viewer_password: str = "viewer-pass"
     
-    # Mail Settings
-    smtp_host: str | None = None 
-    smtp_port: int = 587
-    smtp_user: str | None = None
-    smtp_password: str | None = None
-    smtp_from: str = "nexdrop.team@gmail.com"
-    admin_notification_emails: list[str] = ["s.k.dudhiyawala@gmail.com", "parthmaheriya76@gmail.com"]
+    # EmailJS Settings
+    emailjs_service_id: str | None = None
+    emailjs_public_key: str | None = None
+    emailjs_access_token: str | None = None
+    emailjs_admin_notification_template_id: str | None = None
+    emailjs_forgot_password_template_id: str | None = None
+    emailjs_base_url: str = "https://api.emailjs.com/api/v1.0/email/send"
 
     model_config = {
         "env_file": ENV_FILE,
@@ -54,21 +54,12 @@ class Settings(BaseSettings):
     }
 
     def model_post_init(self, __context) -> None:
-        # Parse admin_notification_emails from comma-separated string if needed
-        if isinstance(self.admin_notification_emails, str):
-            self.admin_notification_emails = [e.strip() for e in self.admin_notification_emails.split(",") if e.strip()]
-        # Log loaded values for debugging
-        import os
         env_file = BASE_DIR / ".env"
         print(f"Looking for .env at: {env_file}")
         print(f".env exists: {env_file.exists()}")
-        if env_file.exists():
-            with open(env_file) as f:
-                print(f".env contents:\n{f.read()}")
-        print(f"Loaded SMTP host: {self.smtp_host}")
-        print(f"Loaded SMTP port: {self.smtp_port}")
-        print(f"Loaded SMTP user: {self.smtp_user}")
-        print(f"Loaded admin_notification_emails: {self.admin_notification_emails}")
+        print(f"Loaded EmailJS service id: {self.emailjs_service_id}")
+        print(f"Loaded EmailJS admin notification template id: {self.emailjs_admin_notification_template_id}")
+        print(f"Loaded EmailJS forgot password template id: {self.emailjs_forgot_password_template_id}")
 
 
 def get_settings() -> Settings:
@@ -77,5 +68,12 @@ def get_settings() -> Settings:
     if settings.uploads_path.startswith("../") or settings.uploads_path.startswith("..\\"):
         settings.uploads_path = str((BASE_DIR / settings.uploads_path).resolve())   
     print(f"Settings loaded: uploads_path = {settings.uploads_path}")
-    print(f"SMTP Settings: host={settings.smtp_host}, port={settings.smtp_port}, user={settings.smtp_user}, emails={settings.admin_notification_emails}")
+    print(
+        "EmailJS Settings: service_id=%s, admin_template_id=%s, forgot_password_template_id=%s"
+        % (
+            settings.emailjs_service_id,
+            settings.emailjs_admin_notification_template_id,
+            settings.emailjs_forgot_password_template_id,
+        )
+    )
     return settings

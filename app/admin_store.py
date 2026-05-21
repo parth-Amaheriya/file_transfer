@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import urllib.error
+import urllib.request
 import hashlib
 import hmac
 import json
@@ -108,11 +110,13 @@ class AdminStore:
         return email.strip().lower()
 
     @staticmethod
-    def _is_smtp_network_error(error: BaseException) -> bool:
+    def _is_email_delivery_network_error(error: BaseException) -> bool:
         current_error: BaseException | None = error
 
         while current_error is not None:
             if isinstance(current_error, OSError) and getattr(current_error, "errno", None) in {101, 111, 113, 10051, 10060}:
+                return True
+            if isinstance(current_error, urllib.error.URLError):
                 return True
             current_error = current_error.__cause__ or current_error.__context__
 
@@ -129,62 +133,44 @@ class AdminStore:
 
         return list(recipients.values())
 
-    @staticmethod
-    def _send_email_message_sync(message: Any, smtp_kwargs: dict[str, Any]) -> None:
-        import smtplib
-        import ssl
+    async def _send_emailjs_message(self, *, template_id: str, template_params: dict[str, Any]) -> None:
+        if not self.settings.emailjs_service_id or not self.settings.emailjs_public_key:
+            raise RuntimeError("EmailJS is not configured")
 
-        timeout = smtp_kwargs.get("timeout", 20)
-        hostname = smtp_kwargs["hostname"]
-        port = smtp_kwargs["port"]
-        use_tls = smtp_kwargs["use_tls"]
-        start_tls = smtp_kwargs["start_tls"]
-        username = smtp_kwargs.get("username")
-        password = smtp_kwargs.get("password")
-
-        if use_tls:
-            with smtplib.SMTP_SSL(hostname, port, timeout=timeout, context=ssl.create_default_context()) as server:
-                if username:
-                    server.login(username, password or "")
-                server.send_message(message)
-            return
-
-        with smtplib.SMTP(hostname, port, timeout=timeout) as server:
-            server.ehlo()
-            if start_tls:
-                server.starttls(context=ssl.create_default_context())
-                server.ehlo()
-            if username:
-                server.login(username, password or "")
-            server.send_message(message)
-
-    async def _send_email_message(self, message: Any) -> None:
-        if not self.settings.smtp_host:
-            raise RuntimeError("SMTP is not configured")
-
-        smtp_kwargs = {
-            "hostname": self.settings.smtp_host,
-            "port": self.settings.smtp_port,
-            "use_tls": self.settings.smtp_port == 465,
-            "start_tls": self.settings.smtp_port == 587,
+        payload = {
+            "service_id": self.settings.emailjs_service_id,
+            "template_id": template_id,
+            "user_id": self.settings.emailjs_public_key,
+            "template_params": template_params,
         }
-        if self.settings.smtp_user:
-            smtp_kwargs["username"] = self.settings.smtp_user
-            smtp_kwargs["password"] = self.settings.smtp_password
-            print(f"DEBUG: SMTP credentials provided, user: {self.settings.smtp_user}")
+        if self.settings.emailjs_access_token:
+            payload["accessToken"] = self.settings.emailjs_access_token
+
+        def send_sync() -> dict[str, Any]:
+            request = urllib.request.Request(
+                self.settings.emailjs_base_url,
+                data=json.dumps(payload).encode("utf-8"),
+                headers={"Content-Type": "application/json"},
+                method="POST",
+            )
+
+            with urllib.request.urlopen(request, timeout=20) as response:
+                response_body = response.read().decode("utf-8")
+                if not response_body:
+                    return {}
+                try:
+                    return json.loads(response_body)
+                except json.JSONDecodeError:
+                    return {"raw": response_body}
 
         try:
-            import aiosmtplib
-
-            await aiosmtplib.send(message, **smtp_kwargs)
-            return
+            await asyncio.to_thread(send_sync)
         except Exception as error:
-            if self._is_smtp_network_error(error):
-                logger.debug("Async SMTP send failed due to connectivity issue, falling back to smtplib: %s", error)
+            if self._is_email_delivery_network_error(error):
+                logger.warning("EmailJS delivery failed due to connectivity issue: %s", error)
             else:
-                logger.warning("Async SMTP send failed, falling back to smtplib: %s", error, exc_info=True)
-
-        await asyncio.to_thread(self._send_email_message_sync, message, smtp_kwargs)
+                logger.warning("EmailJS delivery failed: %s", error, exc_info=True)
+            raise
 
     async def initialize(self) -> None:
         async with self._lock:
@@ -392,19 +378,16 @@ class AdminStore:
         logger.info(f"Starting to send admin notification for action: {entry.action}")
         recipients = await self._admin_notification_recipients()
         logger.info(
-            "SMTP Config - host: %s, port: %s, user: %s, recipients: %s",
-            self.settings.smtp_host,
-            self.settings.smtp_port,
-            self.settings.smtp_user,
+            "EmailJS Config - service_id: %s, admin_template_id: %s, recipients: %s",
+            self.settings.emailjs_service_id,
+            self.settings.emailjs_admin_notification_template_id,
             recipients,
         )
-        if not self.settings.smtp_host or not recipients:
-            logger.debug("Skipping admin notification email: SMTP host or recipients not configured")
+        if not self.settings.emailjs_service_id or not self.settings.emailjs_public_key or not self.settings.emailjs_admin_notification_template_id or not recipients:
+            logger.debug("Skipping admin notification email: EmailJS or recipients not configured")
             return
 
         try:
-            from email.message import EmailMessage
-
             action_title = entry.action.replace("_", " ").title()
             timestamp_str = entry.timestamp.strftime("%Y-%m-%d %H:%M:%S UTC")
 
@@ -426,20 +409,22 @@ class AdminStore:
             if entry.metadata:
                 text_body += f"\nMetadata:\n{json.dumps(entry.metadata, indent=2)}\n"
 
-            msg = EmailMessage()
-            msg["Subject"] = f"Nexdrop Security Alert: {action_title.upper()}"
-            msg["From"] = self.settings.smtp_from
-            msg["To"] = ", ".join(recipients)
-            msg.set_content(text_body)
-
             logger.info("Sending admin notification email to %s", recipients)
-            try:
-                await self._send_email_message(msg)
-            except Exception as error:
-                if self._is_smtp_network_error(error):
-                    logger.warning("Skipping admin notification email for action %s: SMTP is unreachable (%s)", entry.action, error)
-                    return
-                raise
+            await self._send_emailjs_message(
+                template_id=self.settings.emailjs_admin_notification_template_id,
+                template_params={
+                    "to_email": ", ".join(recipients),
+                    "subject": f"Nexdrop Security Alert: {action_title.upper()}",
+                    "action": action_title,
+                    "actor": entry.actor,
+                    "role": entry.role,
+                    "target": entry.target or "N/A",
+                    "status": entry.status.upper(),
+                    "timestamp": timestamp_str,
+                    "message": text_body,
+                    "recipient_count": len(recipients),
+                },
+            )
             logger.info("Admin notification email sent successfully for action: %s", entry.action)
         except Exception as error:
             logger.error("Failed to send admin notification email: %s", error, exc_info=True)
@@ -585,13 +570,6 @@ class AdminStore:
             return
 
         try:
-            from email.message import EmailMessage
-
-            msg = EmailMessage()
-            msg["Subject"] = "Nexdrop - Password Reset OTP"
-            msg["From"] = self.settings.smtp_from
-            msg["To"] = user.email
-
             text_body = (
                 "Nexdrop Password Reset\n"
                 "======================\n\n"
@@ -601,14 +579,25 @@ class AdminStore:
                 "If you did not request this, please ignore this email.\n"
             )
 
-            msg.set_content(text_body)
+            if not self.settings.emailjs_service_id or not self.settings.emailjs_public_key or not self.settings.emailjs_forgot_password_template_id:
+                logger.debug("Skipping forgot password email: EmailJS is not configured")
+                return
 
-            logger.info(f"Sending forgot password email to {msg['To']} for user {username}")
+            logger.info(f"Sending forgot password email to {user.email} for user {username}")
             try:
-                await self._send_email_message(msg)
+                await self._send_emailjs_message(
+                    template_id=self.settings.emailjs_forgot_password_template_id,
+                    template_params={
+                        "to_email": user.email,
+                        "subject": "Nexdrop - Password Reset OTP",
+                        "username": username,
+                        "otp": otp,
+                        "message": text_body,
+                    },
+                )
             except Exception as error:
-                if self._is_smtp_network_error(error):
-                    logger.warning("Skipping forgot password email for user %s: SMTP is unreachable (%s)", username, error)
+                if self._is_email_delivery_network_error(error):
+                    logger.warning("Skipping forgot password email for user %s: EmailJS is unreachable (%s)", username, error)
                     return
                 raise
             logger.info("Forgot password email sent successfully")
