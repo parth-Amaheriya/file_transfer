@@ -879,6 +879,10 @@ async def pairing_events(code: str):
                 except asyncio.TimeoutError:
                     # Send heartbeat to keep connection alive
                     yield ": heartbeat\n\n"
+        except asyncio.CancelledError:
+            logger.info(f"SSE client disconnected for pairing {pairing.id}")
+        except GeneratorExit:
+            logger.info(f"SSE generator closed for pairing {pairing.id}")
         except Exception as e:
             logger.error(f"SSE error for pairing {pairing.id}: {e}")
         finally:
@@ -990,7 +994,7 @@ async def websocket_peer_connection(pairing_id: str, device_id: str, ws: WebSock
                 continue
 
             # Relay messages to peer
-            if msg_type in ["text", "file_init", "file_chunk", "file_end", "file_shared", "snippet"]:
+            if msg_type in ["text", "file_init", "file_chunk", "file_end", "file_shared", "snippet", "transfer_approval_request", "transfer_approval_response", "transfer_approval_cancel"]:
                 success = await connection_manager.send_to_peer(
                     pairing_id, device_id, {"sender": device_id, **data}
                 )
