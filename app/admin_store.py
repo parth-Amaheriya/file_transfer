@@ -513,13 +513,13 @@ class AdminStore:
             self._memory_audit_log.append(entry)
             self._memory_audit_log = self._memory_audit_log[-200:]
 
-        # Send notification for admin panel changes and destructive actions
+        # Send notification for admin panel changes and destructive actions.
+        # Admin disconnect actions are intentionally excluded so no email is sent
+        # when an operator disconnects a session or device from the admin panel.
         notification_actions = {
             "update_settings",
-            "disconnect_session",
-            "disconnect_device",
             "create_user",
-            "update_user",
+            # "update_user",
             "delete_user",
         }
         if status == "success" and action in notification_actions:
