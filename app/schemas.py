@@ -17,7 +17,7 @@ class FeatureFlags(BaseModel):
 
 
 class PolicySettings(BaseModel):
-    max_file_size_bytes: int = Field(default=25 * 1024 * 1024, ge=1)
+    max_file_size_bytes: int = Field(default=2500 * 1024 * 1024, ge=1)
     pairing_ttl_seconds: int = Field(default=3600, ge=60)
     max_devices_per_session: int = Field(default=4, ge=1)
     pairing_rate_limit_per_minute: int = Field(default=30, ge=1)
