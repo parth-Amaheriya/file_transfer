@@ -227,9 +227,15 @@ class AdminStore:
 
         if self._mongo_enabled and self._db is not None:
             for user in default_users:
+                user_dict = user.model_dump(mode="python")
+                password_hash = user_dict.pop("password_hash")
+                
                 await self._db.admin_users.update_one(
                     {"username": user.username},
-                    {"$set": user.model_dump(mode="python")},
+                    {
+                        "$set": user_dict,
+                        "$setOnInsert": {"password_hash": password_hash}
+                    },
                     upsert=True,
                 )
             return
@@ -243,7 +249,6 @@ class AdminStore:
                     update={
                         "email": user.email,
                         "role": user.role,
-                        "password_hash": user.password_hash,
                         "display_name": user.display_name,
                     }
                 )
