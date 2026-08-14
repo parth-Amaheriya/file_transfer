@@ -682,37 +682,20 @@ async def get_runtime_config() -> PublicConfigOut:
     return runtime_settings
 
 
-def create_jwt(payload: dict, secret: str) -> str:
-    header = {"alg": "HS256", "typ": "JWT"}
-    b64_header = base64.urlsafe_b64encode(json.dumps(header).encode()).decode().rstrip("=")
-    b64_payload = base64.urlsafe_b64encode(json.dumps(payload).encode()).decode().rstrip("=")
-    signature = hmac.new(secret.encode(), f"{b64_header}.{b64_payload}".encode(), hashlib.sha256).digest()
-    b64_signature = base64.urlsafe_b64encode(signature).decode().rstrip("=")
-    return f"{b64_header}.{b64_payload}.{b64_signature}"
-
-def generate_turn_credentials(ttl: int, secret_key: str) -> tuple[str, str]:
-    timestamp = int(time.time()) + ttl
-    username = f"{timestamp}:{uuid4().hex}"
-    dig = hmac.new(secret_key.encode(), username.encode(), hashlib.sha1).digest()
-    password = base64.b64encode(dig).decode()
-    return username, password
+import urllib.request
 
 @app.get("/api/credentials")
 async def get_turn_credentials():
-    # Define TTL (5 minutes)
-    ttl = 300
+    try:
+        req = urllib.request.Request("https://filesync.app/api/credentials", method="GET")
+        with urllib.request.urlopen(req) as response:
+            data = json.loads(response.read().decode())
+            return data
+    except Exception as e:
+        logger.error(f"Failed to fetch TURN credentials from filesync: {e}")
+        raise HTTPException(status_code=500, detail="Failed to retrieve TURN credentials")
 
-    secret_key = settings.admin_token_secret
-    # Generate temporary credentials
-    username, credential = generate_turn_credentials(ttl, secret_key)
 
-    # Generate token
-    expiration = datetime.now() + timedelta(seconds=ttl)
-    payload = {'username': username, 'credential': credential, 'exp': int(expiration.timestamp())}
-    token = create_jwt(payload, secret_key)
-
-    # Return token
-    return { "token": token }
 
 
 @app.post("/api/admin/login", response_model=AdminLoginResponse)
