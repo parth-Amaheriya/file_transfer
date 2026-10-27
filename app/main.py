@@ -19,6 +19,7 @@ import hashlib
 from urllib.parse import quote
 
 import qrcode
+import websockets
 from fastapi import Depends, FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
@@ -682,18 +683,38 @@ async def get_runtime_config() -> PublicConfigOut:
     return runtime_settings
 
 
-import urllib.request
-
 @app.get("/api/credentials")
 async def get_turn_credentials():
+    """Fetch short-lived TURN credentials from FileSync's signaling socket.
+
+    FileSync has no HTTP credentials endpoint; its clients register over the
+    WebSocket and receive ``ice.iceServers`` (plus a ttl) in the reply.
+    """
     try:
-        req = urllib.request.Request("https://filesync.app/api/credentials", method="GET")
-        with urllib.request.urlopen(req) as response:
-            data = json.loads(response.read().decode())
-            return data
+        async with websockets.connect(
+            "wss://filesync.app/ws", open_timeout=10, close_timeout=2
+        ) as ws:
+            await ws.send(
+                json.dumps(
+                    {
+                        "type": "register",
+                        "id": str(uuid4()),
+                        "token": secrets.token_urlsafe(24),
+                    }
+                )
+            )
+            raw = await asyncio.wait_for(ws.recv(), timeout=10)
+
+        payload = json.loads(raw)
+        ice = payload.get("ice") or {}
+        ice_servers = ice.get("iceServers")
+        if payload.get("type") != "registered" or not isinstance(ice_servers, list):
+            raise ValueError(f"Unexpected FileSync response: {payload!r}")
+
+        return {"iceServers": ice_servers, "ttl": ice.get("ttl", 3600)}
     except Exception as e:
         logger.error(f"Failed to fetch TURN credentials from filesync: {e}")
-        raise HTTPException(status_code=500, detail="Failed to retrieve TURN credentials")
+        raise HTTPException(status_code=502, detail="Failed to retrieve TURN credentials")
 
 
 
